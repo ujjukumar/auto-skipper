@@ -1,7 +1,8 @@
 using System.Diagnostics;
-using Spectre.Console;
 using AutoSkipper.Interfaces;
 using AutoSkipper.Models;
+using AutoSkipper.Input;
+using AutoSkipper.Services;
 
 namespace AutoSkipper.Services;
 
@@ -75,7 +76,6 @@ internal class AutoSkipper : IDisposable
     private int _pressCount = 0;
     private double _sessionStartTime = 0.0;
     private double _inactiveSince = 0.0;
-    private StatusContext? _statusContext;
 
     public AutoSkipper(ScreenConfig cfg, ILogger logger, IInputSender inputSender)
     {
@@ -164,29 +164,12 @@ internal class AutoSkipper : IDisposable
 
     public void Run()
     {
-        AnsiConsole.Status()
-            .Spinner(Spinner.Known.SimpleDots) // Fallback, but we will override style
-            .SpinnerStyle(Style.Parse("black")) // Hide spinner by making it black (or match bg)
-            .Start("Waiting for input...", ctx =>
-            {
-                ctx.Spinner(new NoSpinner()); // Use custom no-op spinner
-                _statusContext = ctx;
-                RunInternal();
-            });
-    }
-
-    // Custom spinner that does nothing
-    private class NoSpinner : Spinner
-    {
-        public override TimeSpan Interval => TimeSpan.FromMilliseconds(1000);
-        public override bool IsUnicode => false;
-        public override IReadOnlyList<string> Frames => new[] { " " };
+        RunInternal();
     }
 
     private void RunInternal()
     {
         _logger.Log("Ready.");
-        UpdateStatus("Ready");
         
         double lastPressTime = GetTime();
         double nextInterval = NextKeyInterval();
@@ -201,8 +184,6 @@ internal class AutoSkipper : IDisposable
 
                 if (!_running)
                 {
-                    UpdateStatus("Paused");
-                    // Do not call ResetCounter here repeatedly
                     _wakeEvent.Wait(WaitEventTimeout);
                     _wakeEvent.Reset();
                     lastPressTime = GetTime();
@@ -220,7 +201,7 @@ internal class AutoSkipper : IDisposable
                     if (_inactiveSince == 0.0) _inactiveSince = now;
                     if (now - _inactiveSince > InactivePauseSeconds)
                     {
-                        _logger.Log($"[yellow]Paused due to inactivity ({InactivePauseSeconds}s)[/]");
+                        _logger.LogWarning($"Paused due to inactivity ({InactivePauseSeconds}s)");
                         ToggleRun(false);
                         _inactiveSince = 0.0;
                     }
@@ -231,12 +212,11 @@ internal class AutoSkipper : IDisposable
                     _windowActive = isActive;
                     string countLog = GetCountLog();
                     ResetCounter();
-                    _logger.Log(isActive ? $"Window State: [green]ACTIVE[/]{countLog}" : $"Window State: [red]INACTIVE[/]{countLog}");
+                    _logger.Log(isActive ? $"Window State: ACTIVE{countLog}" : $"Window State: INACTIVE{countLog}");
                 }
 
                 if (!isActive)
                 {
-                    UpdateStatus("Waiting for Window...");
                     SleepUntil(now + WindowCheckInterval);
                     continue;
                 }
@@ -244,7 +224,6 @@ internal class AutoSkipper : IDisposable
                 // Active break
                 if (now < _breakUntil)
                 {
-                    UpdateStatus($"Taking a break... ({_breakUntil - now:F1}s)");
                     SleepUntil(_breakUntil);
                     continue;
                 }
@@ -259,7 +238,7 @@ internal class AutoSkipper : IDisposable
                         double dur = BreakDuration(br);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        _logger.Log($"Break: [yellow]{br}[/] {dur:F1}s{countLog}");
+                        _logger.LogWarning($"Break: {br} {dur:F1}s{countLog}");
                         _breakUntil = now + dur;
                         nextInterval = NextKeyInterval();
                         continue;
@@ -295,13 +274,12 @@ internal class AutoSkipper : IDisposable
                         OnDialogueStateChanged?.Invoke(isDialogue);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        _logger.Log(isDialogue ? $"Dialogue State: [green]DETECTED[/]{countLog}" : $"Dialogue State: [yellow]ENDED[/]{countLog}");
+                        _logger.Log(isDialogue ? $"Dialogue State: DETECTED{countLog}" : $"Dialogue State: ENDED{countLog}");
                     }
 
                     nextStateCheck = now + (isDialogue ? ActiveDialogueCheckInterval : StateCheckInterval);
                     if (!isDialogue)
                     {
-                        UpdateStatus("Idle (No Dialogue)");
                         SleepUntil(now + IdleSleepInterval);
                         continue;
                     }
@@ -310,7 +288,6 @@ internal class AutoSkipper : IDisposable
                 // Post-burst pause
                 if (now < _postBurstPauseUntil)
                 {
-                    UpdateStatus("Pausing after burst...");
                     SleepUntil(_postBurstPauseUntil);
                     continue;
                 }
@@ -331,7 +308,7 @@ internal class AutoSkipper : IDisposable
                         _burstRemaining = Random.Shared.Next(BurstRemainingMin, BurstRemainingMax);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        _logger.Log($"Burst mode: [red]{_burstRemaining}[/]{countLog}");
+                        _logger.LogWarning($"Burst mode: {_burstRemaining}{countLog}");
                     }
 
                     if (_skipNext)
@@ -346,10 +323,6 @@ internal class AutoSkipper : IDisposable
                         lastPressTime = now;
                         nextInterval = NextKeyInterval();
                     }
-                }
-                else
-                {
-                    UpdateStatus($"Skipping... [green]{_pressCount}[/] presses");
                 }
 
                 double nextActionTime = lastPressTime + nextInterval;
@@ -382,7 +355,6 @@ internal class AutoSkipper : IDisposable
         if (!useSpace)
         {
             _pressCount++;
-            UpdateStatus($"Skipping... [green]{_pressCount}[/] presses");
         }
         
         if (!useSpace && _doubleNext)
@@ -390,7 +362,6 @@ internal class AutoSkipper : IDisposable
             _doubleNext = false;
             _inputSender.TapF();
             _pressCount++;
-            UpdateStatus($"Skipping... [green]{_pressCount}[/] presses");
             _postBurstPauseUntil = now + PostBurstPauseBase + Random.Shared.NextDouble() * PostBurstPauseRandom;
 
             _logger.LogDebug(() => "Press: F (double)");
@@ -433,9 +404,8 @@ internal class AutoSkipper : IDisposable
             {
                 countLog = GetCountLog();
                 ResetCounter();
-                UpdateStatus("Paused");
             }
-            _logger.Log(on ? "[bold green]RUN[/]" : $"[bold yellow]PAUSE[/]{countLog}"); 
+            _logger.Log(on ? "RUN" : $"PAUSE{countLog}"); 
             Wake(); 
         }
     }
@@ -465,7 +435,6 @@ internal class AutoSkipper : IDisposable
                     _pressCount = 0;
                     _sessionStartTime = GetTime();
                 }
-                UpdateStatus("Bursting...");
                 var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, cts.Token);
                 while (!linkedCts.IsCancellationRequested)
@@ -477,7 +446,6 @@ internal class AutoSkipper : IDisposable
                         {
                             _pressCount++;
                         }
-                        UpdateStatus($"Bursting...");
                     }
                     try
                     {
@@ -491,7 +459,6 @@ internal class AutoSkipper : IDisposable
                     _sessionStartTime = GetTime();
                 }
                 _logger.LogWarning("Burst End");
-                UpdateStatus("Ready");
             }, token);
         }
     }
@@ -501,7 +468,7 @@ internal class AutoSkipper : IDisposable
         if (_pressCount > 0)
         {
             double duration = GetTime() - _sessionStartTime;
-            return $". Total F presses: [cyan]{_pressCount}[/] in [cyan]{duration:F1}s[/]";
+            return $". Total F presses: {_pressCount} in {duration:F1}s";
         }
         return "";
     }
@@ -510,14 +477,5 @@ internal class AutoSkipper : IDisposable
     {
         _pressCount = 0;
         _sessionStartTime = GetTime();
-        UpdateStatus("Ready");
-    }
-
-    private void UpdateStatus(string status)
-    {
-        if (_statusContext != null)
-        {
-            _statusContext.Status(status);
-        }
     }
 }

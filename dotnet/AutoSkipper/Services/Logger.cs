@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
-using Spectre.Console;
 using AutoSkipper.Interfaces;
 
 namespace AutoSkipper.Services;
@@ -50,34 +49,34 @@ public class Logger : ILogger
                 // Invoke event for GUI
                 OnLogMessage?.Invoke(entry.Timestamp, entry.Level, entry.Message);
 
-                string timestamp = $"[grey]{entry.Timestamp:HH:mm:ss.fff}[/]";
-                string level = entry.Level switch
+                string timestamp = $"{entry.Timestamp:HH:mm:ss.fff}";
+                string level = entry.Level.ToString().ToUpper();
+                
+                string plainMessage = _markupRegex.Replace(entry.Message, "");
+                
+                // Color output to console
+                Console.ForegroundColor = entry.Level switch
                 {
-                    LogLevel.Info => "[blue]INFO[/]",
-                    LogLevel.Debug => "[grey]DEBUG[/]",
-                    LogLevel.Error => "[red]ERROR[/]",
-                    LogLevel.Success => "[green]SUCCESS[/]",
-                    LogLevel.Warning => "[yellow]WARN[/]",
-                    _ => "[white]LOG[/]"
+                    LogLevel.Info => ConsoleColor.Blue,
+                    LogLevel.Debug => ConsoleColor.Gray,
+                    LogLevel.Error => ConsoleColor.Red,
+                    LogLevel.Success => ConsoleColor.Green,
+                    LogLevel.Warning => ConsoleColor.Yellow,
+                    _ => ConsoleColor.White
                 };
                 
-                string message = entry.Message;
-                // Basic markup escaping if needed, though we generally trust internal messages
-                // message = Markup.Escape(message); 
-
-                AnsiConsole.MarkupLine($"{timestamp} | {level} | {message}");
+                Console.WriteLine($"{timestamp} | {level} | {plainMessage}");
+                Console.ResetColor();
                 
                 // File logging remains plain text (strip Spectre markup)
                 var writer = _logWriter;
                 if (writer != null)
                 {
-                    string plainMessage = _markupRegex.Replace(entry.Message, "");
-                    writer.WriteLine($"{entry.Timestamp:HH:mm:ss.fff} | {entry.Level.ToString().ToUpper()} | {plainMessage}");
+                    writer.WriteLine($"{entry.Timestamp:HH:mm:ss.fff} | {level} | {plainMessage}");
                 }
             }
             catch (Exception ex)
             {
-                // Fallback if Spectre fails
                 Console.WriteLine($"[FATAL] Logger failed: {ex.Message}");
             }
         }
@@ -89,7 +88,7 @@ public class Logger : ILogger
         _logQueue.TryAdd(new LogEntry(LogLevel.Info, message));
     }
     
-    // Add back static methods for compatibility
+    // Static methods for compatibility
     public static void LogStatic(string message) => new Logger().Log(message);
     public static void LogSuccessStatic(string message) => new Logger().LogSuccess(message);
     public static void LogWarningStatic(string message) => new Logger().LogWarning(message);
