@@ -2,8 +2,11 @@
   <Configurations>
     <Platform Name="x64" />
   </Configurations>
-  <Folder Name="/Solution Items/" />
-  <Project Path="AutoSkipper.csproj">
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="AutoSkipper/AutoSkipper.csproj">
     <Platform Project="x64" />
   </Project>
 </Solution>

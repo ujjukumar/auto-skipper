@@ -1,10 +1,6 @@
-using System;
-using System.Drawing;
-using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
-using System.Windows.Forms;
 
-namespace AutoSkipper;
+namespace AutoSkipper.UI;
 
 public class LogForm : Form
 {
@@ -83,7 +79,7 @@ public class LogForm : Form
         // --- Setup ---
         // Force handle creation
         var _ = this.Handle;
-        Logger.OnLogMessage += Logger_OnLogMessage;
+        Services.Logger.OnLogMessage += Logger_OnLogMessage;
     }
 
     private Button CreateDarkButton(string text, EventHandler onClick)
@@ -104,7 +100,7 @@ public class LogForm : Form
         return btn;
     }
 
-    private void Logger_OnLogMessage(DateTime timestamp, Logger.LogLevel level, string message)
+    private void Logger_OnLogMessage(DateTime timestamp, Services.Logger.LogLevel level, string message)
     {
         if (_richTextBox.IsDisposed || !_richTextBox.IsHandleCreated) return;
 
@@ -116,11 +112,11 @@ public class LogForm : Form
 
         Color color = level switch
         {
-            Logger.LogLevel.Info => Color.FromArgb(86, 156, 214),    // Blue
-            Logger.LogLevel.Debug => Color.FromArgb(128, 128, 128),  // Gray
-            Logger.LogLevel.Error => Color.FromArgb(244, 71, 71),    // Red
-            Logger.LogLevel.Success => Color.FromArgb(106, 153, 85), // Green
-            Logger.LogLevel.Warning => Color.FromArgb(206, 145, 120),// Orange/Peach
+            Services.Logger.LogLevel.Info => Color.FromArgb(86, 156, 214),    // Blue
+            Services.Logger.LogLevel.Debug => Color.FromArgb(128, 128, 128),  // Gray
+            Services.Logger.LogLevel.Error => Color.FromArgb(244, 71, 71),    // Red
+            Services.Logger.LogLevel.Success => Color.FromArgb(106, 153, 85), // Green
+            Services.Logger.LogLevel.Warning => Color.FromArgb(206, 145, 120),// Orange/Peach
             _ => _fgColor
         };
 
@@ -153,7 +149,7 @@ public class LogForm : Form
         }
         else
         {
-            Logger.OnLogMessage -= Logger_OnLogMessage;
+            Services.Logger.OnLogMessage -= Logger_OnLogMessage;
             base.OnFormClosing(e);
         }
     }

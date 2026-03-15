@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Models;
 
 [JsonSourceGenerationOptions(WriteIndented = true)]
 [JsonSerializable(typeof(ConfigData))]

@@ -24,16 +24,10 @@
     
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\auto_marker.ico</ApplicationIcon>
-    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <StartupObject>AutoSkipper.Program</StartupObject>
+    <StartupObject>AutoSkipper.UI.Program</StartupObject>
     <ErrorReport>none</ErrorReport>
     <DebugType>none</DebugType>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Compile Include="Program.cs" />
-    <Compile Include="src\**\*.cs" />
-  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Spectre.Console" Version="0.54.0" />

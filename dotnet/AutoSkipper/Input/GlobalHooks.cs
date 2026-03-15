@@ -1,11 +1,9 @@
-using System;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
+using AutoSkipper.Services;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Input;
 
-// --- 5. Global Hooks ---
 internal class GlobalHooks : IDisposable
 {
     private const int VK_F7 = 0x76;
@@ -16,9 +14,9 @@ internal class GlobalHooks : IDisposable
     private readonly Native.HookProc _mouseProc;
     private readonly IntPtr _hKbdHook = IntPtr.Zero;
     private readonly IntPtr _hMouseHook = IntPtr.Zero;
-    private readonly AutoSkipper _skipper;
+    private readonly Services.AutoSkipper _skipper;
 
-    public GlobalHooks(AutoSkipper skipper)
+    public GlobalHooks(Services.AutoSkipper skipper)
     {
         _skipper = skipper;
         _kbdProc = HookCallbackKbd;
@@ -76,3 +74,4 @@ internal class GlobalHooks : IDisposable
         if (_hMouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_hMouseHook);
     }
 }
+

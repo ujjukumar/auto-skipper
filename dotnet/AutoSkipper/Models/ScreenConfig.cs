@@ -1,9 +1,7 @@
-using System;
-using System.IO;
 using System.Text.Json;
-using System.Threading.Tasks;
+using AutoSkipper.Services;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Models;
 
 internal class ScreenConfig
 {
@@ -64,14 +62,14 @@ internal class ScreenConfig
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Error loading config.json: {ex.Message}");
-                Logger.Log("Using default configuration.");
+                Services.Logger.LogErrorStatic($"Error loading config.json: {ex.Message}");
+                Services.Logger.LogStatic("Using default configuration.");
                 config = new ConfigData();
             }
         }
         else
         {
-            Logger.Log("config.json not found. Creating with default values.");
+            Services.Logger.LogStatic("config.json not found. Creating with default values.");
             config = new ConfigData();
             var json = JsonSerializer.Serialize(config, JsonContext.Default.ConfigData);
             await File.WriteAllTextAsync(configPath, json);

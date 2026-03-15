@@ -1,34 +1,26 @@
-using System;
-using System.Drawing;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using Spectre.Console;
+using AutoSkipper.Interfaces;
+using AutoSkipper.Models;
 
-namespace AutoSkipper;
+namespace AutoSkipper.UI;
 
 internal class Program
 {
     [STAThread]
     static void Main(string[] args)
     {
-        // Parse command line arguments
         bool verbose = false;
         foreach (var arg in args)
         {
             if (arg == "-v" || arg == "--verbose") verbose = true;
         }
         
-        Logger.SetVerbose(verbose);
+        Services.Logger.SetVerbose(verbose);
         
         ApplicationConfiguration.Initialize();
 
         try
         {
-            // Initialize configuration (synchronously for startup)
             var config = ScreenConfig.CreateAsync().GetAwaiter().GetResult();
-            
-            // Run the application context
             using var context = new AutoSkipperContext(config);
             Application.Run(context);
         }
@@ -42,16 +34,18 @@ internal class Program
 internal class AutoSkipperContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
-    private readonly AutoSkipper _skipper;
-    private readonly GlobalHooks? _hooks;
+    private readonly Services.AutoSkipper _skipper;
+    private readonly Input.GlobalHooks? _hooks;
     private readonly Thread? _logicThread;
     private readonly LogForm _logForm;
     private Icon _defaultIcon = SystemIcons.Application;
     private Icon _activeIcon = SystemIcons.Asterisk;
     private bool _cleanupDone = false;
+    private readonly ILogger _logger;
 
     public AutoSkipperContext(ScreenConfig config)
     {
+        _logger = new Services.Logger();
         LoadIcons();
         
         _notifyIcon = new NotifyIcon
@@ -67,7 +61,7 @@ internal class AutoSkipperContext : ApplicationContext
         
         var startItem = new ToolStripMenuItem("Start/Resume (F8)", null, (s, e) => _skipper!.ToggleRun(true));
         var pauseItem = new ToolStripMenuItem("Pause (F9)", null, (s, e) => _skipper!.ToggleRun(false));
-        var toggleLogItem = new ToolStripMenuItem("Toggle Log File (F7)", null, (s, e) => Logger.ToggleFileLogging());
+        var toggleLogItem = new ToolStripMenuItem("Toggle Log File (F7)", null, (s, e) => Services.Logger.ToggleFileLogging());
         var showLogsItem = new ToolStripMenuItem("Show Logs", null, (s, e) => ShowLogs());
         var exitItem = new ToolStripMenuItem("Exit", null, Exit);
 
@@ -83,10 +77,10 @@ internal class AutoSkipperContext : ApplicationContext
         
         _notifyIcon.DoubleClick += (s, e) => _skipper!.ToggleRun(!_skipper!.IsRunning);
 
-        _skipper = new AutoSkipper(config);
+        _skipper = new Services.AutoSkipper(config, _logger, new Input.InputSender());
         try
         {
-            _hooks = new GlobalHooks(_skipper);
+            _hooks = new Input.GlobalHooks(_skipper);
         }
         catch (Exception ex)
         {
@@ -105,8 +99,8 @@ internal class AutoSkipperContext : ApplicationContext
         };
         _logicThread.Start();
         
-        Logger.LogSuccess("AutoSkipper started minimized to tray.");
-        Logger.Log("Use F8/F9 or Tray Icon to control.");
+        _logger.LogSuccess("AutoSkipper started minimized to tray.");
+        _logger.Log("Use F8/F9 or Tray Icon to control.");
     }
 
     private void LoadIcons()
@@ -127,27 +121,24 @@ internal class AutoSkipperContext : ApplicationContext
             }
             catch (Exception ex)
             {
-                Logger.LogWarning($"Failed to load icon: {ex.Message}");
+                _logger.LogWarning($"Failed to load icon: {ex.Message}");
             }
         }
     }
 
     private void OnDialogueStateChanged(bool inDialogue)
     {
-        if (_notifyIcon == null) return;
         _notifyIcon.Icon = inDialogue ? _activeIcon : _defaultIcon;
         UpdateTooltip();
     }
 
     private void OnRunningStateChanged(bool running)
     {
-        if (_notifyIcon == null) return;
         UpdateTooltip();
     }
 
     private void UpdateTooltip()
     {
-        if (_skipper == null || _notifyIcon == null) return;
         string status = _skipper.IsRunning ? "Running" : "Paused";
         _notifyIcon.Text = $"Genshin AutoSkipper - {status}";
     }
@@ -167,8 +158,6 @@ internal class AutoSkipperContext : ApplicationContext
 
     private void Exit(object? sender, EventArgs e)
     {
-        // This will break the Application.Run loop eventually
-        // But we manually clean up first
         Cleanup();
         Application.Exit();
     }
@@ -179,7 +168,6 @@ internal class AutoSkipperContext : ApplicationContext
         _cleanupDone = true;
 
         _notifyIcon.Visible = false;
-        
         _logForm.ForceClose();
 
         _skipper.ShouldExit = true;
@@ -192,7 +180,7 @@ internal class AutoSkipperContext : ApplicationContext
 
         _hooks?.Dispose();
         _skipper.Dispose();
-        Logger.Shutdown();
+        Services.Logger.Shutdown();
     }
 
     protected override void Dispose(bool disposing)

@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Services;
 
 // --- 1. Low Level Native Interop (Win32 API) ---
 internal static partial class Native

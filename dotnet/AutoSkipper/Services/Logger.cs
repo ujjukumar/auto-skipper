@@ -2,12 +2,13 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 using Spectre.Console;
+using AutoSkipper.Interfaces;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Services;
 
 // A high-performance, asynchronous logger designed to minimize impact on the main application thread.
 // It uses a background thread to process and write log messages from a concurrent queue.
-public static class Logger
+public class Logger : ILogger
 {
     public enum LogLevel { Info, Debug, Error, Success, Warning }
     public static event Action<DateTime, LogLevel, string>? OnLogMessage;
@@ -82,31 +83,38 @@ public static class Logger
         }
     }
 
-    public static void Log(string message)
+    public void Log(string message)
     {
         if (_isShutdown) return;
         _logQueue.TryAdd(new LogEntry(LogLevel.Info, message));
     }
     
-    public static void LogSuccess(string message)
+    // Add back static methods for compatibility
+    public static void LogStatic(string message) => new Logger().Log(message);
+    public static void LogSuccessStatic(string message) => new Logger().LogSuccess(message);
+    public static void LogWarningStatic(string message) => new Logger().LogWarning(message);
+    public static void LogErrorStatic(string message) => new Logger().LogError(message);
+    public static void LogDebugStatic(Func<string> messageFactory) => new Logger().LogDebug(messageFactory);
+
+    public void LogSuccess(string message)
     {
         if (_isShutdown) return;
         _logQueue.TryAdd(new LogEntry(LogLevel.Success, message));
     }
     
-    public static void LogWarning(string message)
+    public void LogWarning(string message)
     {
         if (_isShutdown) return;
         _logQueue.TryAdd(new LogEntry(LogLevel.Warning, message));
     }
     
-    public static void LogError(string message)
+    public void LogError(string message)
     {
         if (_isShutdown) return;
         _logQueue.TryAdd(new LogEntry(LogLevel.Error, message));
     }
 
-    public static void LogDebug(Func<string> messageFactory)
+    public void LogDebug(Func<string> messageFactory)
     {
         if (_isShutdown || !_verbose) return;
         _logQueue.TryAdd(new LogEntry(LogLevel.Debug, messageFactory()));
@@ -115,7 +123,7 @@ public static class Logger
     public static void SetVerbose(bool verbose)
     {
         _verbose = verbose;
-        if (verbose) Log("Verbose mode enabled");
+        if (verbose) new Logger().Log("Verbose mode enabled");
     }
 
     public static void ToggleFileLogging()
@@ -131,16 +139,16 @@ public static class Logger
                     string logPath = Path.Combine(appDataPath, "autoskip_dialogue.log");
                     var stream = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.Read);
                     _logWriter = new StreamWriter(stream, Encoding.UTF8, 4096) { AutoFlush = false };
-                    LogSuccess("File logging enabled.");
+                    new Logger().LogSuccess("File logging enabled.");
                 }
                 catch (Exception ex)
                 {
-                    LogError($"Failed to enable file logging: {ex.Message}");
+                    new Logger().LogError($"Failed to enable file logging: {ex.Message}");
                 }
             }
             else
             {
-                Log("File logging disabled.");
+                new Logger().Log("File logging disabled.");
                 _logWriter.Flush();
                 _logWriter.Dispose();
                 _logWriter = null;

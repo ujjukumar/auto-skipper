@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using Spectre.Console;
+using AutoSkipper.Interfaces;
+using AutoSkipper.Models;
 
-namespace AutoSkipper;
+namespace AutoSkipper.Services;
 
 internal enum BreakType
 {
@@ -16,6 +18,8 @@ internal class AutoSkipper : IDisposable
     public event Action<bool>? OnRunningStateChanged;
     
     private readonly ScreenConfig _cfg;
+    private readonly ILogger _logger;
+    private readonly IInputSender _inputSender;
     private volatile bool _running = false;
     public bool IsRunning => _running;
     private volatile bool _shouldExit = false;
@@ -73,9 +77,11 @@ internal class AutoSkipper : IDisposable
     private double _inactiveSince = 0.0;
     private StatusContext? _statusContext;
 
-    public AutoSkipper(ScreenConfig cfg)
+    public AutoSkipper(ScreenConfig cfg, ILogger logger, IInputSender inputSender)
     {
         _cfg = cfg;
+        _logger = logger;
+        _inputSender = inputSender;
         _hdc = Native.GetDC(IntPtr.Zero);
         _spamCancel = new CancellationTokenSource();
     }
@@ -179,7 +185,7 @@ internal class AutoSkipper : IDisposable
 
     private void RunInternal()
     {
-        Logger.Log("Ready.");
+        _logger.Log("Ready.");
         UpdateStatus("Ready");
         
         double lastPressTime = GetTime();
@@ -214,7 +220,7 @@ internal class AutoSkipper : IDisposable
                     if (_inactiveSince == 0.0) _inactiveSince = now;
                     if (now - _inactiveSince > InactivePauseSeconds)
                     {
-                        Logger.Log($"[yellow]Paused due to inactivity ({InactivePauseSeconds}s)[/]");
+                        _logger.Log($"[yellow]Paused due to inactivity ({InactivePauseSeconds}s)[/]");
                         ToggleRun(false);
                         _inactiveSince = 0.0;
                     }
@@ -225,7 +231,7 @@ internal class AutoSkipper : IDisposable
                     _windowActive = isActive;
                     string countLog = GetCountLog();
                     ResetCounter();
-                    Logger.Log(isActive ? $"Window State: [green]ACTIVE[/]{countLog}" : $"Window State: [red]INACTIVE[/]{countLog}");
+                    _logger.Log(isActive ? $"Window State: [green]ACTIVE[/]{countLog}" : $"Window State: [red]INACTIVE[/]{countLog}");
                 }
 
                 if (!isActive)
@@ -253,7 +259,7 @@ internal class AutoSkipper : IDisposable
                         double dur = BreakDuration(br);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        Logger.Log($"Break: [yellow]{br}[/] {dur:F1}s{countLog}");
+                        _logger.Log($"Break: [yellow]{br}[/] {dur:F1}s{countLog}");
                         _breakUntil = now + dur;
                         nextInterval = NextKeyInterval();
                         continue;
@@ -266,7 +272,7 @@ internal class AutoSkipper : IDisposable
                     uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
                     bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
 
-                    Logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
+                    _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
                     
                     bool isChoice = false;
                     if (!isPlaying)
@@ -278,7 +284,7 @@ internal class AutoSkipper : IDisposable
                             uint pHigh = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.hy);
                             isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
 
-                            Logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
+                            _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
                         }
                     }
 
@@ -289,7 +295,7 @@ internal class AutoSkipper : IDisposable
                         OnDialogueStateChanged?.Invoke(isDialogue);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        Logger.Log(isDialogue ? $"Dialogue State: [green]DETECTED[/]{countLog}" : $"Dialogue State: [yellow]ENDED[/]{countLog}");
+                        _logger.Log(isDialogue ? $"Dialogue State: [green]DETECTED[/]{countLog}" : $"Dialogue State: [yellow]ENDED[/]{countLog}");
                     }
 
                     nextStateCheck = now + (isDialogue ? ActiveDialogueCheckInterval : StateCheckInterval);
@@ -325,7 +331,7 @@ internal class AutoSkipper : IDisposable
                         _burstRemaining = Random.Shared.Next(BurstRemainingMin, BurstRemainingMax);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        Logger.Log($"Burst mode: [red]{_burstRemaining}[/]{countLog}");
+                        _logger.Log($"Burst mode: [red]{_burstRemaining}[/]{countLog}");
                     }
 
                     if (_skipNext)
@@ -357,12 +363,12 @@ internal class AutoSkipper : IDisposable
         }
         catch (Exception ex)
         {
-            Logger.LogError($"An unexpected error occurred in the main loop: {ex.Message}");
-            Logger.Log(ex.ToString());
+            _logger.LogError($"An unexpected error occurred in the main loop: {ex.Message}");
+            _logger.Log(ex.ToString());
         }
         finally
         {
-            Logger.Log("Closing Logic Loop");
+            _logger.Log("Closing Logic Loop");
         }
     }
     
@@ -370,8 +376,8 @@ internal class AutoSkipper : IDisposable
     {
         bool useSpace = Random.Shared.NextDouble() < (_burstMode ? BurstModeSpaceChance : SpaceKeyChance);
         string key = useSpace ? "Space" : "F";
-        if (useSpace) InputSender.TapSpace(); else InputSender.TapF();
-        Logger.LogDebug(() => $"Press: {key}");
+        if (useSpace) _inputSender.TapSpace(); else _inputSender.TapF();
+        _logger.LogDebug(() => $"Press: {key}");
         
         if (!useSpace)
         {
@@ -382,12 +388,12 @@ internal class AutoSkipper : IDisposable
         if (!useSpace && _doubleNext)
         {
             _doubleNext = false;
-            InputSender.TapF();
+            _inputSender.TapF();
             _pressCount++;
             UpdateStatus($"Skipping... [green]{_pressCount}[/] presses");
             _postBurstPauseUntil = now + PostBurstPauseBase + Random.Shared.NextDouble() * PostBurstPauseRandom;
 
-            Logger.LogDebug(() => "Press: F (double)");
+            _logger.LogDebug(() => "Press: F (double)");
         }
 
         if (_burstMode)
@@ -429,20 +435,20 @@ internal class AutoSkipper : IDisposable
                 ResetCounter();
                 UpdateStatus("Paused");
             }
-            Logger.Log(on ? "[bold green]RUN[/]" : $"[bold yellow]PAUSE[/]{countLog}"); 
+            _logger.Log(on ? "[bold green]RUN[/]" : $"[bold yellow]PAUSE[/]{countLog}"); 
             Wake(); 
         }
     }
     
     public void HandleMouse4()
     {
-        Logger.LogDebug(() => "Mouse4 detected");
-        if (IsGameActive()) { InputSender.TapT(); Logger.Log("Remap: T"); }
+        _logger.LogDebug(() => "Mouse4 detected");
+        if (IsGameActive()) { _inputSender.TapT(); _logger.Log("Remap: T"); }
     }
 
     public void HandleMouse5()
     {
-        Logger.LogDebug(() => "Mouse5 detected");
+        _logger.LogDebug(() => "Mouse5 detected");
         if (!IsGameActive()) return;
         lock (_spamLock)
         {
@@ -453,7 +459,7 @@ internal class AutoSkipper : IDisposable
             
             Task.Run(async () =>
             {
-                Logger.LogWarning("Burst Start");
+                _logger.LogWarning("Burst Start");
                 lock (_spamLock)
                 {
                     _pressCount = 0;
@@ -466,7 +472,7 @@ internal class AutoSkipper : IDisposable
                 {
                     if (IsGameActive()) 
                     {
-                        InputSender.TapF();
+                        _inputSender.TapF();
                         lock (_spamLock)
                         {
                             _pressCount++;
@@ -484,7 +490,7 @@ internal class AutoSkipper : IDisposable
                     _pressCount = 0;
                     _sessionStartTime = GetTime();
                 }
-                Logger.LogWarning("Burst End");
+                _logger.LogWarning("Burst End");
                 UpdateStatus("Ready");
             }, token);
         }

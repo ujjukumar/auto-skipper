@@ -1,4 +1,4 @@
-namespace AutoSkipper;
+namespace AutoSkipper.Models;
 
 internal class ConfigData
 {
