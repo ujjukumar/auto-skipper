@@ -70,5 +70,8 @@ internal static partial class Native
     public struct KeyboardInput { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
 
     public const uint INPUT_KEYBOARD = 1;
+    public const uint INPUT_MOUSE = 0;
     public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
 }

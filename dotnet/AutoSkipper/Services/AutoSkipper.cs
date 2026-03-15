@@ -54,7 +54,6 @@ internal class AutoSkipper : IDisposable
     private const double SkipNextChance = 1.0 / 40.0;
     private const double DoubleNextChance = 1.0 / 35.0;
     private const double BurstModeChance = 1.0 / 60.0;
-    private const double BurstModeSpaceChance = 0.1;
     private const int BurstPoolMin = 2;
     private const int BurstPoolMax = 6;
     private const int BurstRemainingMin = 3;
@@ -65,7 +64,6 @@ internal class AutoSkipper : IDisposable
     private const double BreakChance = 0.015;
     private const double BreakDurationMin = 2.0;
     private const double BreakDurationMax = 8.0;
-    private const double SpaceKeyChance = 0.1;
     private const int BurstModeDelayMs = 120;
     private const int InactivePauseSeconds = 120;
     private bool _inDialogue = false;
@@ -154,7 +152,6 @@ internal class AutoSkipper : IDisposable
 
     private BreakType MaybeBreak()
     {
-        // Simplified break logic: just one type of break, but we keep the enum for now
         if (Random.Shared.NextDouble() < BreakChance) return BreakType.Short;
         return BreakType.None;
     }
@@ -163,11 +160,6 @@ internal class AutoSkipper : IDisposable
         BreakDurationMin + Random.Shared.NextDouble() * (BreakDurationMax - BreakDurationMin);
 
     public void Run()
-    {
-        RunInternal();
-    }
-
-    private void RunInternal()
     {
         _logger.Log("Ready.");
         
@@ -347,17 +339,16 @@ internal class AutoSkipper : IDisposable
     
     private void PerformPress(double now)
     {
-        bool useSpace = Random.Shared.NextDouble() < (_burstMode ? BurstModeSpaceChance : SpaceKeyChance);
-        string key = useSpace ? "Space" : "F";
-        if (useSpace) _inputSender.TapSpace(); else _inputSender.TapF();
-        _logger.LogDebug(() => $"Press: {key}");
+        bool useClick = Random.Shared.NextDouble() < (_burstMode ? 0.0 : _cfg.Config.LeftClickChance);
+        if (useClick) _inputSender.LeftClick(); else _inputSender.TapF();
+        _logger.LogDebug(() => $"Press: {(useClick ? "LeftClick" : "F")}");
         
-        if (!useSpace)
+        if (!useClick)
         {
             _pressCount++;
         }
         
-        if (!useSpace && _doubleNext)
+        if (!useClick && _doubleNext)
         {
             _doubleNext = false;
             _inputSender.TapF();

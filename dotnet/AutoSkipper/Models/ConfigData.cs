@@ -11,6 +11,7 @@ internal class ConfigData
     public double StandardDelayMin { get; set; } = 0.13;
     public double StandardDelayMax { get; set; } = 0.17;
     public int ColorTolerance { get; set; } = 10;
+    public double LeftClickChance { get; set; } = 0.1;
 
     public void Validate()
     {
@@ -18,5 +19,6 @@ internal class ConfigData
         StandardDelayMax = Math.Clamp(StandardDelayMax, MinDelay, MaxDelay);
         if (StandardDelayMin > StandardDelayMax) (StandardDelayMin, StandardDelayMax) = (StandardDelayMax, StandardDelayMin);
         ColorTolerance = Math.Clamp(ColorTolerance, MinColorTolerance, MaxColorTolerance);
+        LeftClickChance = Math.Clamp(LeftClickChance, 0.0, 1.0);
     }
 }

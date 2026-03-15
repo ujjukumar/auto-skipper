@@ -33,5 +33,19 @@ internal class InputSender : IInputSender
     
     public void TapT() => PressKey(0x54); // T
     public void TapF() => PressKey(0x46); // F
-    public void TapSpace() => PressKey(0x20); // Space
+    public void LeftClick()
+    {
+        lock (_inputLock)
+        {
+            _inputPool[0].type = Native.INPUT_MOUSE;
+            _inputPool[0].u.mi.dwFlags = Native.MOUSEEVENTF_LEFTDOWN;
+            _inputPool[0].u.mi.dwExtraInfo = IntPtr.Zero;
+
+            _inputPool[1].type = Native.INPUT_MOUSE;
+            _inputPool[1].u.mi.dwFlags = Native.MOUSEEVENTF_LEFTUP;
+            _inputPool[1].u.mi.dwExtraInfo = IntPtr.Zero;
+
+            Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
 }
