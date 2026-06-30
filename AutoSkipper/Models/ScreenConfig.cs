@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Threading;
 using AutoSkipper.Services;
 
 namespace AutoSkipper.Models;
@@ -91,6 +92,23 @@ internal class ScreenConfig
 
     private int Wa(int x) => (int)(x / (float)BaseWidth * WIDTH);
     private int Ha(int y) => (int)(y / (float)BaseHeight * HEIGHT);
+
+    private static readonly SemaphoreSlim _saveLock = new(1, 1);
+
+    public async Task SaveConfigAsync()
+    {
+        await _saveLock.WaitAsync();
+        try
+        {
+            string configPath = GetConfigPath();
+            var json = JsonSerializer.Serialize(_configData, JsonContext.Default.ConfigData);
+            await File.WriteAllTextAsync(configPath, json);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
+    }
 
     private int ScalePos(int hd, int doubleHd, float extra = 0.0f)
     {

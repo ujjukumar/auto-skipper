@@ -55,7 +55,22 @@ internal class AutoSkipperContext : ApplicationContext
             Visible = true
         };
 
-        _logForm = new LogForm();
+        var macroService = new Services.MacroService(new Input.InputSender(), _logger);
+        
+        _skipper = new Services.AutoSkipper(config, _logger, new Input.InputSender());
+        try
+        {
+            _hooks = new Input.GlobalHooks(_skipper, macroService, config.Config.Macros);
+        }
+        catch (Exception ex)
+        {
+            _skipper.Dispose();
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
+            throw new InvalidOperationException($"Failed to initialize global hooks: {ex.Message}", ex);
+        }
+
+        _logForm = new LogForm(config.Config.Macros, _hooks, config);
 
         var contextMenu = new ContextMenuStrip();
         
@@ -76,19 +91,6 @@ internal class AutoSkipperContext : ApplicationContext
         _notifyIcon.ContextMenuStrip = contextMenu;
         
         _notifyIcon.DoubleClick += (s, e) => _skipper!.ToggleRun(!_skipper!.IsRunning);
-
-        _skipper = new Services.AutoSkipper(config, _logger, new Input.InputSender());
-        try
-        {
-            _hooks = new Input.GlobalHooks(_skipper);
-        }
-        catch (Exception ex)
-        {
-            _skipper.Dispose();
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
-            throw new InvalidOperationException($"Failed to initialize global hooks: {ex.Message}", ex);
-        }
 
         _skipper.OnDialogueStateChanged += OnDialogueStateChanged;
         _skipper.OnRunningStateChanged += OnRunningStateChanged;

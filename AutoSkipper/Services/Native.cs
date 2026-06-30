@@ -13,6 +13,7 @@ internal static partial class Native
     [LibraryImport("user32.dll")] public static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [LibraryImport("gdi32.dll")] public static partial uint GetPixel(IntPtr hdc, int nXPos, int nYPos);
     [LibraryImport("user32.dll")] public static partial void PostQuitMessage(int nExitCode);
+    [LibraryImport("user32.dll")] public static partial short GetAsyncKeyState(int vKey);
     
     // Hooks
     public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -74,4 +75,6 @@ internal static partial class Native
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 }

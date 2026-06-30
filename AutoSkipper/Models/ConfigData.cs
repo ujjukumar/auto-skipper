@@ -1,5 +1,7 @@
 namespace AutoSkipper.Models;
 
+using System.Collections.Generic;
+
 internal class ConfigData
 {
     private const int MinColorTolerance = 0;
@@ -12,6 +14,7 @@ internal class ConfigData
     public double StandardDelayMax { get; set; } = 0.17;
     public int ColorTolerance { get; set; } = 10;
     public double LeftClickChance { get; set; } = 0.1;
+    public List<Macro> Macros { get; set; } = new();
 
     public void Validate()
     {

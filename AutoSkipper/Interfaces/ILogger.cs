@@ -7,4 +7,6 @@ public interface ILogger
     void LogError(string message);
     void LogSuccess(string message);
     void LogDebug(Func<string> message);
+
+    bool IsVerbose { get; }
 }

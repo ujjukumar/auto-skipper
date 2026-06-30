@@ -119,6 +119,8 @@ public class Logger : ILogger
         _logQueue.TryAdd(new LogEntry(LogLevel.Debug, messageFactory()));
     }
 
+    public bool IsVerbose => _verbose;
+
     public static void SetVerbose(bool verbose)
     {
         _verbose = verbose;

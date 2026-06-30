@@ -33,6 +33,29 @@ internal class InputSender : IInputSender
     
     public void TapT() => PressKey(0x54); // T
     public void TapF() => PressKey(0x46); // F
+
+    public void KeyDown(ushort vkCode)
+    {
+        lock (_inputLock)
+        {
+            _inputPool[0].type = Native.INPUT_KEYBOARD;
+            _inputPool[0].u.ki.wVk = vkCode;
+            _inputPool[0].u.ki.dwFlags = 0;
+            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
+
+    public void KeyUp(ushort vkCode)
+    {
+        lock (_inputLock)
+        {
+            _inputPool[0].type = Native.INPUT_KEYBOARD;
+            _inputPool[0].u.ki.wVk = vkCode;
+            _inputPool[0].u.ki.dwFlags = Native.KEYEVENTF_KEYUP;
+            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
+
     public void LeftClick()
     {
         lock (_inputLock)
@@ -43,6 +66,22 @@ internal class InputSender : IInputSender
 
             _inputPool[1].type = Native.INPUT_MOUSE;
             _inputPool[1].u.mi.dwFlags = Native.MOUSEEVENTF_LEFTUP;
+            _inputPool[1].u.mi.dwExtraInfo = IntPtr.Zero;
+
+            Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
+
+    public void RightClick()
+    {
+        lock (_inputLock)
+        {
+            _inputPool[0].type = Native.INPUT_MOUSE;
+            _inputPool[0].u.mi.dwFlags = Native.MOUSEEVENTF_RIGHTDOWN;
+            _inputPool[0].u.mi.dwExtraInfo = IntPtr.Zero;
+
+            _inputPool[1].type = Native.INPUT_MOUSE;
+            _inputPool[1].u.mi.dwFlags = Native.MOUSEEVENTF_RIGHTUP;
             _inputPool[1].u.mi.dwExtraInfo = IntPtr.Zero;
 
             Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());

@@ -6,13 +6,6 @@ using AutoSkipper.Services;
 
 namespace AutoSkipper.Services;
 
-internal enum BreakType
-{
-    None,
-    Short,
-    Long
-}
-
 internal class AutoSkipper : IDisposable
 {
     public event Action<bool>? OnDialogueStateChanged;
@@ -131,33 +124,27 @@ internal class AutoSkipper : IDisposable
         if (_burstPool > 0)
         {
             _burstPool--;
-            // Fast burst: 50% of standard speed
-            double min = _cfg.Config.StandardDelayMin * FastBurstMultiplier;
-            double max = _cfg.Config.StandardDelayMax * FastBurstMultiplier;
-            return min + Random.Shared.NextDouble() * (max - min);
+            return FastBurstInterval();
         }
         
         // Chance to enter fast burst mode
         if (Random.Shared.NextDouble() < FastBurstChance)
         {
             _burstPool = Random.Shared.Next(BurstPoolMin, BurstPoolMax);
-            double min = _cfg.Config.StandardDelayMin * FastBurstMultiplier;
-            double max = _cfg.Config.StandardDelayMax * FastBurstMultiplier;
-            return min + Random.Shared.NextDouble() * (max - min);
+            return FastBurstInterval();
         }
 
         // Standard speed
         return _cfg.Config.StandardDelayMin + Random.Shared.NextDouble() * (_cfg.Config.StandardDelayMax - _cfg.Config.StandardDelayMin);
     }
 
-    private BreakType MaybeBreak()
+    // Fast burst: 50% of standard speed
+    private double FastBurstInterval()
     {
-        if (Random.Shared.NextDouble() < BreakChance) return BreakType.Short;
-        return BreakType.None;
+        double min = _cfg.Config.StandardDelayMin * FastBurstMultiplier;
+        double max = _cfg.Config.StandardDelayMax * FastBurstMultiplier;
+        return min + Random.Shared.NextDouble() * (max - min);
     }
-
-    private double BreakDuration(BreakType kind) => 
-        BreakDurationMin + Random.Shared.NextDouble() * (BreakDurationMax - BreakDurationMin);
 
     public void Run()
     {
@@ -224,13 +211,12 @@ internal class AutoSkipper : IDisposable
                 if (now - _lastBreakCheck > BreakInterval)
                 {
                     _lastBreakCheck = now;
-                    BreakType br = MaybeBreak();
-                    if (br != BreakType.None)
+                    if (Random.Shared.NextDouble() < BreakChance)
                     {
-                        double dur = BreakDuration(br);
+                        double dur = BreakDurationMin + Random.Shared.NextDouble() * (BreakDurationMax - BreakDurationMin);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        _logger.LogWarning($"Break: {br} {dur:F1}s{countLog}");
+                        _logger.LogWarning($"Break: {dur:F1}s{countLog}");
                         _breakUntil = now + dur;
                         nextInterval = NextKeyInterval();
                         continue;
@@ -243,7 +229,8 @@ internal class AutoSkipper : IDisposable
                     uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
                     bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
 
-                    _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
+                    if (_logger.IsVerbose)
+                        _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
                     
                     bool isChoice = false;
                     if (!isPlaying)
@@ -255,7 +242,8 @@ internal class AutoSkipper : IDisposable
                             uint pHigh = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.hy);
                             isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
 
-                            _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
+                            if (_logger.IsVerbose)
+                                _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
                         }
                     }
 
@@ -341,7 +329,8 @@ internal class AutoSkipper : IDisposable
     {
         bool useClick = Random.Shared.NextDouble() < (_burstMode ? 0.0 : _cfg.Config.LeftClickChance);
         if (useClick) _inputSender.LeftClick(); else _inputSender.TapF();
-        _logger.LogDebug(() => $"Press: {(useClick ? "LeftClick" : "F")}");
+        if (_logger.IsVerbose)
+            _logger.LogDebug(() => $"Press: {(useClick ? "LeftClick" : "F")}");
         
         if (!useClick)
         {
