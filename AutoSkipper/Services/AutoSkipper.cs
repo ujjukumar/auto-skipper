@@ -223,8 +223,12 @@ internal class AutoSkipper : IDisposable
                     }
                 }
 
+                // Compute whether a press is due so we can force a fresh
+                // dialogue check in the same iteration, right before pressing.
+                bool actionDue = (now - lastPressTime) >= nextInterval || _burstMode;
+
                 // Dialogue detection
-                if (now >= nextStateCheck)
+                if (now >= nextStateCheck || actionDue)
                 {
                     uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
                     bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
@@ -255,6 +259,17 @@ internal class AutoSkipper : IDisposable
                         string countLog = GetCountLog();
                         ResetCounter();
                         _logger.Log(isDialogue ? $"Dialogue State: DETECTED{countLog}" : $"Dialogue State: ENDED{countLog}");
+
+                        // Drop any pending humanization/burst state when dialogue ends so
+                        // it can't carry over and fire presses into the next dialogue.
+                        if (!isDialogue)
+                        {
+                            _burstMode = false;
+                            _burstRemaining = 0;
+                            _skipNext = false;
+                            _doubleNext = false;
+                            _burstPool = 0;
+                        }
                     }
 
                     nextStateCheck = now + (isDialogue ? ActiveDialogueCheckInterval : StateCheckInterval);
@@ -272,9 +287,10 @@ internal class AutoSkipper : IDisposable
                     continue;
                 }
 
-                // Action
-                bool actionDue = (now - lastPressTime) >= nextInterval || _burstMode;
-                if (actionDue)
+                // Action. actionDue was computed above; the detection block runs
+                // whenever it is set, so reaching here means a fresh check confirmed
+                // dialogue this iteration. The _inDialogue guard is defensive.
+                if (actionDue && _inDialogue)
                 {
                     double r1 = Random.Shared.NextDouble();
                     double r2 = Random.Shared.NextDouble();

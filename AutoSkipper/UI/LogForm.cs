@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using System.Collections.Generic;
 using System.Diagnostics;
 using AutoSkipper.Input;
 using AutoSkipper.Models;
@@ -56,7 +55,7 @@ internal class LogForm : Form
     private Stopwatch? _recordStopwatch;
     private long _lastActionTimeMs;
 
-    public LogForm(List<Macro> macros, GlobalHooks hooks, ScreenConfig config)
+    public LogForm(List<Macro> macros, GlobalHooks hooks, ScreenConfig config, Icon? icon = null)
     {
         _macros = macros;
         _hooks = hooks;
@@ -65,7 +64,7 @@ internal class LogForm : Form
         this.Text = "AutoSkipper";
         this.Size = new Size(820, 560);
         this.MinimumSize = new Size(720, 480);
-        this.Icon = SystemIcons.Application;
+        this.Icon = icon ?? SystemIcons.Application;
         this.ShowInTaskbar = false;
         this.BackColor = _bgColor;
         this.ForeColor = _fgColor;
@@ -134,7 +133,19 @@ internal class LogForm : Form
 
         // Force handle creation & hook logger
         var _ = this.Handle;
-        Services.Logger.OnLogMessage += Logger_OnLogMessage;
+        Services.Logger.RegisterViewer(Logger_OnLogMessage);
+
+        // Hide to tray on minimize instead of leaving a minimized window.
+        // This also avoids the RichTextBox losing its content when its handle
+        // is recreated on restore.
+        this.Resize += (s, e) =>
+        {
+            if (this.WindowState == FormWindowState.Minimized)
+            {
+                this.Hide();
+                this.WindowState = FormWindowState.Normal;
+            }
+        };
 
         // Hook recording events
         _hooks.OnActionInputRecorded += OnActionInputRecorded;
@@ -852,7 +863,7 @@ internal class LogForm : Form
         }
         else
         {
-            Services.Logger.OnLogMessage -= Logger_OnLogMessage;
+            Services.Logger.UnregisterViewer(Logger_OnLogMessage);
             _hooks.OnActionInputRecorded -= OnActionInputRecorded;
             _hooks.OnRecordingStopped -= OnRecordingStopped;
             base.OnFormClosing(e);

@@ -70,7 +70,7 @@ internal class AutoSkipperContext : ApplicationContext
             throw new InvalidOperationException($"Failed to initialize global hooks: {ex.Message}", ex);
         }
 
-        _logForm = new LogForm(config.Config.Macros, _hooks, config);
+        _logForm = new LogForm(config.Config.Macros, _hooks, config, _defaultIcon);
 
         var contextMenu = new ContextMenuStrip();
         
@@ -120,11 +120,31 @@ internal class AutoSkipperContext : ApplicationContext
                 using var stream = File.OpenRead(iconPath);
                 _defaultIcon = new Icon(stream);
                 _activeIcon = _defaultIcon;
+                return;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning($"Failed to load icon: {ex.Message}");
             }
+        }
+
+        // Fallback: use the icon embedded in the executable (ApplicationIcon).
+        try
+        {
+            string? exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                Icon? embedded = Icon.ExtractAssociatedIcon(exePath);
+                if (embedded != null)
+                {
+                    _defaultIcon = embedded;
+                    _activeIcon = embedded;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"Failed to extract embedded icon: {ex.Message}");
         }
     }
 
@@ -153,8 +173,11 @@ internal class AutoSkipperContext : ApplicationContext
         }
         else
         {
+            if (_logForm.WindowState == FormWindowState.Minimized)
+                _logForm.WindowState = FormWindowState.Normal;
             _logForm.Show();
             _logForm.BringToFront();
+            _logForm.Activate();
         }
     }
 

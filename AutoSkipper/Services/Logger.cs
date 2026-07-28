@@ -30,6 +30,11 @@ public class Logger : ILogger
     private static readonly Task _consumerTask;
     private static volatile bool _isShutdown = false;
 
+    // Bounded in-memory history so viewers (e.g. the log window) can replay past entries.
+    private const int MaxHistory = 2000;
+    private static readonly Queue<LogEntry> _history = new();
+    private static readonly object _historyLock = new();
+
     private static bool _verbose = false;
     private static volatile StreamWriter? _logWriter; // Volatile for thread-safe reads
     private static readonly object _fileLock = new(); // Lock for creating/disposing the writer
@@ -47,7 +52,12 @@ public class Logger : ILogger
             try
             {
                 // Invoke event for GUI
-                OnLogMessage?.Invoke(entry.Timestamp, entry.Level, entry.Message);
+                lock (_historyLock)
+                {
+                    _history.Enqueue(entry);
+                    if (_history.Count > MaxHistory) _history.Dequeue();
+                    OnLogMessage?.Invoke(entry.Timestamp, entry.Level, entry.Message);
+                }
 
                 string timestamp = $"{entry.Timestamp:HH:mm:ss.fff}";
                 string level = entry.Level.ToString().ToUpper();
@@ -120,6 +130,27 @@ public class Logger : ILogger
     }
 
     public bool IsVerbose => _verbose;
+
+    // Attaches a viewer, replaying all buffered history first so it sees past
+    // entries, then receiving live updates. Done under the history lock so no
+    // entries are missed or duplicated relative to the live stream.
+    public static void RegisterViewer(Action<DateTime, LogLevel, string> handler)
+    {
+        lock (_historyLock)
+        {
+            foreach (var entry in _history)
+                handler(entry.Timestamp, entry.Level, entry.Message);
+            OnLogMessage += handler;
+        }
+    }
+
+    public static void UnregisterViewer(Action<DateTime, LogLevel, string> handler)
+    {
+        lock (_historyLock)
+        {
+            OnLogMessage -= handler;
+        }
+    }
 
     public static void SetVerbose(bool verbose)
     {
