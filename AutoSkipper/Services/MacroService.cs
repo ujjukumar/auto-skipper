@@ -1,6 +1,4 @@
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+using System.Collections.Concurrent;
 using AutoSkipper.Interfaces;
 using AutoSkipper.Models;
 
@@ -16,6 +14,7 @@ internal class MacroService
 
     private readonly IInputSender _inputSender;
     private readonly ILogger _logger;
+    private readonly ConcurrentDictionary<Macro, byte> _running = new();
 
     public MacroService(IInputSender inputSender, ILogger logger)
     {
@@ -23,7 +22,35 @@ internal class MacroService
         _logger = logger;
     }
 
-    public async Task ExecuteMacroAsync(Macro macro)
+    // Starts the macro on the thread pool, off the hook thread. A macro that is
+    // already running is not started again, so re-pressing its trigger mid-run
+    // can't stack overlapping copies.
+    public void Run(Macro macro)
+    {
+        if (!_running.TryAdd(macro, 0))
+        {
+            _logger.LogDebug(() => $"Macro already running: {macro.Name}");
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ExecuteAsync(macro);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Macro '{macro.Name}' failed: {ex.Message}");
+            }
+            finally
+            {
+                _running.TryRemove(macro, out _);
+            }
+        });
+    }
+
+    private async Task ExecuteAsync(Macro macro)
     {
         _logger.Log($"Executing Macro: {macro.Name}");
         foreach (var action in macro.Actions)
@@ -50,17 +77,15 @@ internal class MacroService
         }
     }
 
-    private static bool IsMouse(ushort vkCode) => vkCode is 0x01 or 0x02 or 0x04 or 0x05 or 0x06;
-
     private void ButtonDown(ushort vkCode)
     {
-        if (IsMouse(vkCode)) _inputSender.MouseDown(vkCode);
+        if (MacroAction.IsMouseKey(vkCode)) _inputSender.MouseDown(vkCode);
         else _inputSender.KeyDown(vkCode);
     }
 
     private void ButtonUp(ushort vkCode)
     {
-        if (IsMouse(vkCode)) _inputSender.MouseUp(vkCode);
+        if (MacroAction.IsMouseKey(vkCode)) _inputSender.MouseUp(vkCode);
         else _inputSender.KeyUp(vkCode);
     }
 }

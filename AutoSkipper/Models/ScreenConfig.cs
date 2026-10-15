@@ -11,8 +11,7 @@ internal class ScreenConfig
     public (int x, int y) PLAYING_ICON { get; }
     public (int x, int ly, int hy) DIALOGUE_ICON { get; }
     public (int x, int y) LOADING_PIXEL { get; }
-    public string WINDOW_TITLE { get; }
-    
+
     public ConfigData Config => _configData;
 
     private readonly ConfigData _configData;
@@ -84,7 +83,6 @@ internal class ScreenConfig
         _configData = configData;
         WIDTH = w; 
         HEIGHT = h;
-        WINDOW_TITLE = _configData.WindowTitle;
         PLAYING_ICON = CalcPlayingIcon();
         DIALOGUE_ICON = CalcDialogueIcon();
         LOADING_PIXEL = (Wa(LoadingPixelX), Ha(LoadingPixelY));

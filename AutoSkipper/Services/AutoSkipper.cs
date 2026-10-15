@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using AutoSkipper.Interfaces;
 using AutoSkipper.Models;
-using AutoSkipper.Input;
-using AutoSkipper.Services;
 
 namespace AutoSkipper.Services;
 
@@ -58,12 +56,17 @@ internal class AutoSkipper : IDisposable
     private const double BreakDurationMin = 2.0;
     private const double BreakDurationMax = 8.0;
     private const int BurstModeDelayMs = 120;
+    private static readonly TimeSpan MouseBurstDuration = TimeSpan.FromSeconds(4);
     private const int InactivePauseSeconds = 120;
 
+    // GetPixel returns CLR_INVALID on failure. It must never count as a colour
+    // match, otherwise a failed read looks like a white dialogue-choice pixel.
+    private const uint ClrInvalid = 0xFFFFFFFF;
+
     // Dialogue debounce: how many consecutive raw pixel readings are required
-    // before the authoritative dialogue state flips. Entering requires more
-    // confirmations to suppress single-frame false positives; exiting stays
-    // responsive so presses stop quickly when a dialogue actually ends.
+    // before the authoritative dialogue state flips. This suppresses single-frame
+    // false positives. Presses still stop on the first negative reading, because
+    // every press also requires a fresh positive raw reading.
     private const int DialogueEnterConfirm = 2;
     private const int DialogueExitConfirm = 2;
 
@@ -72,9 +75,9 @@ internal class AutoSkipper : IDisposable
     private int _dialoguePositiveStreak = 0;
     private int _dialogueNegativeStreak = 0;
     private bool _windowActive = false;
-    private static ReadOnlySpan<char> GenshinWindowTitle => "Genshin Impact".AsSpan();
 
-    // Counter State
+    // Counter State (shared between the logic thread and ToggleRun callers)
+    private readonly object _counterLock = new();
     private int _pressCount = 0;
     private double _sessionStartTime = 0.0;
     private double _inactiveSince = 0.0;
@@ -103,13 +106,14 @@ internal class AutoSkipper : IDisposable
 
         Span<char> buffer = stackalloc char[256];
         int length = Native.GetWindowText(hwnd, buffer, buffer.Length);
-        var windowTitleSpan = buffer[..length];
+        ReadOnlySpan<char> windowTitle = buffer[..length];
 
-        return windowTitleSpan.Equals(GenshinWindowTitle, StringComparison.OrdinalIgnoreCase);
+        return windowTitle.Equals(_cfg.Config.WindowTitle.AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     public bool ColorsMatch(uint pixel, int r, int g, int b)
     {
+        if (pixel == ClrInvalid) return false;
         int pr = (int)(pixel & 0xFF);
         int pg = (int)((pixel >> 8) & 0xFF);
         int pb = (int)((pixel >> 16) & 0xFF);
@@ -122,10 +126,10 @@ internal class AutoSkipper : IDisposable
         for (int i = 0; i < maxRetries; i++)
         {
             uint pixel = Native.GetPixel(_hdc, x, y);
-            if (pixel != uint.MaxValue) return pixel;
+            if (pixel != ClrInvalid) return pixel;
             if (i < maxRetries - 1) Thread.Sleep(1);
         }
-        return uint.MaxValue;
+        return ClrInvalid;
     }
 
     private static double GetTime() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
@@ -224,8 +228,7 @@ internal class AutoSkipper : IDisposable
                 if (isActive != _windowActive)
                 {
                     _windowActive = isActive;
-                    string countLog = GetCountLog();
-                    ResetCounter();
+                    string countLog = TakeCountLog();
                     _logger.Log(isActive ? $"Window State: ACTIVE{countLog}" : $"Window State: INACTIVE{countLog}");
 
                     // Reset detection state when the game loses focus so stale
@@ -263,8 +266,7 @@ internal class AutoSkipper : IDisposable
                     if (Random.Shared.NextDouble() < BreakChance)
                     {
                         double dur = BreakDurationMin + Random.Shared.NextDouble() * (BreakDurationMax - BreakDurationMin);
-                        string countLog = GetCountLog();
-                        ResetCounter();
+                        string countLog = TakeCountLog();
                         _logger.LogWarning($"Break: {dur:F1}s{countLog}");
                         _breakUntil = now + dur;
                         nextInterval = NextKeyInterval();
@@ -299,16 +301,14 @@ internal class AutoSkipper : IDisposable
                     {
                         _inDialogue = true;
                         OnDialogueStateChanged?.Invoke(true);
-                        string countLog = GetCountLog();
-                        ResetCounter();
+                        string countLog = TakeCountLog();
                         _logger.Log($"Dialogue State: DETECTED{countLog}");
                     }
                     else if (_inDialogue && _dialogueNegativeStreak >= DialogueExitConfirm)
                     {
                         _inDialogue = false;
                         OnDialogueStateChanged?.Invoke(false);
-                        string countLog = GetCountLog();
-                        ResetCounter();
+                        string countLog = TakeCountLog();
                         _logger.Log($"Dialogue State: ENDED{countLog}");
 
                         // Drop any pending humanization/burst state when dialogue ends so
@@ -351,8 +351,7 @@ internal class AutoSkipper : IDisposable
                     {
                         _burstMode = true;
                         _burstRemaining = Random.Shared.Next(BurstRemainingMin, BurstRemainingMax);
-                        string countLog = GetCountLog();
-                        ResetCounter();
+                        string countLog = TakeCountLog();
                         _logger.LogWarning($"Burst mode: {_burstRemaining}{countLog}");
                     }
 
@@ -399,14 +398,14 @@ internal class AutoSkipper : IDisposable
         
         if (!useClick)
         {
-            _pressCount++;
+            CountPress();
         }
         
         if (!useClick && _doubleNext)
         {
             _doubleNext = false;
             _inputSender.TapF();
-            _pressCount++;
+            CountPress();
             _postBurstPauseUntil = now + PostBurstPauseBase + Random.Shared.NextDouble() * PostBurstPauseRandom;
 
             _logger.LogDebug(() => "Press: F (double)");
@@ -444,12 +443,7 @@ internal class AutoSkipper : IDisposable
         {
             _running = on; 
             OnRunningStateChanged?.Invoke(on);
-            string countLog = "";
-            if (!on) 
-            {
-                countLog = GetCountLog();
-                ResetCounter();
-            }
+            string countLog = on ? "" : TakeCountLog();
             _logger.Log(on ? "RUN" : $"PAUSE{countLog}"); 
             Wake(); 
         }
@@ -475,52 +469,43 @@ internal class AutoSkipper : IDisposable
             Task.Run(async () =>
             {
                 _logger.LogWarning("Burst Start");
-                lock (_spamLock)
+                int presses = 0;
+                double start = GetTime();
+                using var timeoutCts = new CancellationTokenSource(MouseBurstDuration);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
+                try
                 {
-                    _pressCount = 0;
-                    _sessionStartTime = GetTime();
-                }
-                var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, cts.Token);
-                while (!linkedCts.IsCancellationRequested)
-                {
-                    if (IsGameActive()) 
+                    while (!linkedCts.IsCancellationRequested)
                     {
-                        _inputSender.TapF();
-                        lock (_spamLock)
+                        if (IsGameActive())
                         {
-                            _pressCount++;
+                            _inputSender.TapF();
+                            presses++;
                         }
-                    }
-                    try
-                    {
                         await Task.Delay(BurstModeDelayMs, linkedCts.Token);
                     }
-                    catch (TaskCanceledException) { break; }
                 }
-                lock (_spamLock)
-                {
-                    _pressCount = 0;
-                    _sessionStartTime = GetTime();
-                }
-                _logger.LogWarning("Burst End");
+                catch (OperationCanceledException) { }
+                _logger.LogWarning($"Burst End. Total F presses: {presses} in {GetTime() - start:F1}s");
             }, token);
         }
     }
 
-    private string GetCountLog()
+    private void CountPress()
     {
-        if (_pressCount > 0)
-        {
-            double duration = GetTime() - _sessionStartTime;
-            return $". Total F presses: {_pressCount} in {duration:F1}s";
-        }
-        return "";
+        lock (_counterLock) _pressCount++;
     }
 
-    private void ResetCounter()
+    // Returns the press-count suffix for a log line and starts a new count.
+    private string TakeCountLog()
     {
-        _pressCount = 0;
-        _sessionStartTime = GetTime();
+        lock (_counterLock)
+        {
+            double now = GetTime();
+            string log = _pressCount > 0 ? $". Total F presses: {_pressCount} in {now - _sessionStartTime:F1}s" : "";
+            _pressCount = 0;
+            _sessionStartTime = now;
+            return log;
+        }
     }
 }

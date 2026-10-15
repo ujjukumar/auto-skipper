@@ -4,111 +4,54 @@ using AutoSkipper.Interfaces;
 
 namespace AutoSkipper.Input;
 
-internal class InputSender : IInputSender
+// Each call builds fresh, zero-initialised INPUT structs on the stack, so there is
+// no shared buffer to lock and no stale fields left over in the keyboard/mouse union.
+internal sealed class InputSender : IInputSender
 {
-    private readonly Native.Input[] _inputPool = new Native.Input[2];
-    private readonly object _inputLock = new();
-    
-    public InputSender()
-    {
-        _inputPool[0] = new Native.Input();
-        _inputPool[1] = new Native.Input();
-    }
-    
-    public void PressKey(ushort vkCode)
-    {
-        lock (_inputLock)
-        {
-            _inputPool[0].type = Native.INPUT_KEYBOARD;
-            _inputPool[0].u.ki.wVk = vkCode;
-            _inputPool[0].u.ki.dwFlags = 0; // Down
+    private const ushort VK_F = 0x46;
+    private const ushort VK_T = 0x54;
+    private static readonly int InputSize = Marshal.SizeOf<Native.Input>();
 
-            _inputPool[1].type = Native.INPUT_KEYBOARD;
-            _inputPool[1].u.ki.wVk = vkCode;
-            _inputPool[1].u.ki.dwFlags = Native.KEYEVENTF_KEYUP; // Up
+    public void TapT() => PressKey(VK_T);
+    public void TapF() => PressKey(VK_F);
 
-            Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
-    }
-    
-    public void TapT() => PressKey(0x54); // T
-    public void TapF() => PressKey(0x46); // F
+    public void PressKey(ushort vkCode) => Send([Key(vkCode, 0), Key(vkCode, Native.KEYEVENTF_KEYUP)]);
 
-    public void KeyDown(ushort vkCode)
-    {
-        lock (_inputLock)
-        {
-            _inputPool[0].type = Native.INPUT_KEYBOARD;
-            _inputPool[0].u.ki.wVk = vkCode;
-            _inputPool[0].u.ki.dwFlags = 0;
-            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
-    }
+    public void KeyDown(ushort vkCode) => Send([Key(vkCode, 0)]);
 
-    public void KeyUp(ushort vkCode)
-    {
-        lock (_inputLock)
-        {
-            _inputPool[0].type = Native.INPUT_KEYBOARD;
-            _inputPool[0].u.ki.wVk = vkCode;
-            _inputPool[0].u.ki.dwFlags = Native.KEYEVENTF_KEYUP;
-            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
-    }
+    public void KeyUp(ushort vkCode) => Send([Key(vkCode, Native.KEYEVENTF_KEYUP)]);
 
-    public void LeftClick()
-    {
-        lock (_inputLock)
-        {
-            SetMouse(0, Native.MOUSEEVENTF_LEFTDOWN);
-            SetMouse(1, Native.MOUSEEVENTF_LEFTUP);
-            Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
-    }
+    public void LeftClick() => Send([Mouse(Native.MOUSEEVENTF_LEFTDOWN), Mouse(Native.MOUSEEVENTF_LEFTUP)]);
 
-    public void RightClick()
-    {
-        lock (_inputLock)
-        {
-            SetMouse(0, Native.MOUSEEVENTF_RIGHTDOWN);
-            SetMouse(1, Native.MOUSEEVENTF_RIGHTUP);
-            Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
-    }
+    public void RightClick() => Send([Mouse(Native.MOUSEEVENTF_RIGHTDOWN), Mouse(Native.MOUSEEVENTF_RIGHTUP)]);
 
     public void MouseDown(ushort vkCode)
     {
         var (flags, data) = MouseEvent(vkCode, down: true);
-        lock (_inputLock)
-        {
-            SetMouse(0, flags, data);
-            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
+        Send([Mouse(flags, data)]);
     }
 
     public void MouseUp(ushort vkCode)
     {
         var (flags, data) = MouseEvent(vkCode, down: false);
-        lock (_inputLock)
-        {
-            SetMouse(0, flags, data);
-            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
-        }
+        Send([Mouse(flags, data)]);
     }
 
-    // Fully initialises a mouse input slot. Zeroing dx/dy is required because the
-    // pool is shared with keyboard input via a union and can carry stale values
-    // that would otherwise move the cursor. mouseData selects the X button.
-    private void SetMouse(int index, uint flags, uint mouseData = 0)
+    private static void Send(ReadOnlySpan<Native.Input> inputs) =>
+        Native.SendInput((uint)inputs.Length, inputs, InputSize);
+
+    private static Native.Input Key(ushort vkCode, uint flags) => new()
     {
-        _inputPool[index].type = Native.INPUT_MOUSE;
-        _inputPool[index].u.mi.dx = 0;
-        _inputPool[index].u.mi.dy = 0;
-        _inputPool[index].u.mi.mouseData = mouseData;
-        _inputPool[index].u.mi.time = 0;
-        _inputPool[index].u.mi.dwFlags = flags;
-        _inputPool[index].u.mi.dwExtraInfo = IntPtr.Zero;
-    }
+        type = Native.INPUT_KEYBOARD,
+        u = new Native.InputUnion { ki = new Native.KeyboardInput { wVk = vkCode, dwFlags = flags } }
+    };
+
+    // mouseData selects the X button for MOUSEEVENTF_XDOWN/XUP.
+    private static Native.Input Mouse(uint flags, uint mouseData = 0) => new()
+    {
+        type = Native.INPUT_MOUSE,
+        u = new Native.InputUnion { mi = new Native.MouseInput { dwFlags = flags, mouseData = mouseData } }
+    };
 
     private static (uint flags, uint mouseData) MouseEvent(ushort vkCode, bool down) => vkCode switch
     {

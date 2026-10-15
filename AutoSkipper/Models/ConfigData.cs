@@ -8,8 +8,9 @@ internal class ConfigData
     private const int MaxColorTolerance = 255;
     private const double MinDelay = 0.01;
     private const double MaxDelay = 5.0;
+    private const string DefaultWindowTitle = "Genshin Impact";
 
-    public string WindowTitle { get; set; } = "Genshin Impact";
+    public string WindowTitle { get; set; } = DefaultWindowTitle;
     public double StandardDelayMin { get; set; } = 0.13;
     public double StandardDelayMax { get; set; } = 0.17;
     public int ColorTolerance { get; set; } = 10;
@@ -18,6 +19,7 @@ internal class ConfigData
 
     public void Validate()
     {
+        if (string.IsNullOrWhiteSpace(WindowTitle)) WindowTitle = DefaultWindowTitle;
         StandardDelayMin = Math.Clamp(StandardDelayMin, MinDelay, MaxDelay);
         StandardDelayMax = Math.Clamp(StandardDelayMax, MinDelay, MaxDelay);
         if (StandardDelayMin > StandardDelayMax) (StandardDelayMin, StandardDelayMax) = (StandardDelayMax, StandardDelayMin);

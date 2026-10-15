@@ -13,4 +13,13 @@ public class Macro
         if (TriggerKeys.Count == 0) return "None";
         return string.Join(" + ", TriggerKeys.Select(k => MacroAction.GetKeyName(k)));
     }
+
+    public Macro Clone() => new()
+    {
+        Name = Name,
+        TriggerKeys = new List<ushort>(TriggerKeys),
+        Actions = Actions.Select(a => a.Clone()).ToList()
+    };
+
+    public override string ToString() => Name;
 }

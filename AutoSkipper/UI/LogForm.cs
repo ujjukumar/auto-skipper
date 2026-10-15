@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using AutoSkipper.Input;
 using AutoSkipper.Models;
 
@@ -7,11 +6,15 @@ namespace AutoSkipper.UI;
 internal class LogForm : Form
 {
     // --- Core state ---
-    private readonly List<Macro> _macros;
     private readonly GlobalHooks _hooks;
     private readonly ScreenConfig _config;
+
+    // Macro edits are made on this draft copy and only applied to the live
+    // hooks and config.json when the user clicks Save.
+    private List<Macro> _draft = new();
     private Macro? _selectedMacro;
-    private readonly List<MacroAction> _editingActions = new();
+    private bool _dirty = false;
+    private bool _loadingUI = false;
     private bool _allowClose = false;
 
     // --- Theme ---
@@ -22,8 +25,6 @@ internal class LogForm : Form
     private readonly Color _btnColor = Color.FromArgb(60, 60, 60);
     private readonly Color _borderColor = Color.FromArgb(50, 50, 50);
     private readonly Color _fieldBg = Color.FromArgb(45, 45, 45);
-
-    private static readonly Regex _markupRegex = new(@"\[/?[^\]]*\]", RegexOptions.Compiled);
 
     // --- Logs tab ---
     private readonly RichTextBox _richTextBox;
@@ -48,6 +49,8 @@ internal class LogForm : Form
     private ListView _actionListView = null!;
     private Label _actionsHeader = null!;
     private Button _btnSave = null!;
+    private Button _btnRevert = null!;
+    private Label _unsavedLabel = null!;
 
     // --- Action composer ---
     private ComboBox _buttonCombo = null!;
@@ -56,9 +59,8 @@ internal class LogForm : Form
     private NumericUpDown _durationNud = null!;
     private NumericUpDown _delayNud = null!;
 
-    public LogForm(List<Macro> macros, GlobalHooks hooks, ScreenConfig config, Icon? icon = null)
+    public LogForm(ScreenConfig config, GlobalHooks hooks, Icon? icon = null)
     {
-        _macros = macros;
         _hooks = hooks;
         _config = config;
 
@@ -204,7 +206,7 @@ internal class LogForm : Form
             DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 28
         };
         _macroList.DrawItem += MacroList_DrawItem;
-        _macroList.SelectedIndexChanged += MacroList_SelectedIndexChanged;
+        _macroList.SelectedIndexChanged += (s, e) => LoadSelectedMacro();
 
         // Properties panel
         var propsPanel = new Panel
@@ -349,14 +351,25 @@ internal class LogForm : Form
             btnRemoveAction, btnMoveUp, btnMoveDown, composerTopBorder
         });
 
-        // Save bar
-        var saveBar = new Panel { Dock = DockStyle.Bottom, Height = 46, BackColor = _bgColor, Padding = new Padding(0, 6, 0, 0) };
-        _btnSave = CreateButton("\u2714 Save Macro", BtnSave_Click);
-        _btnSave.Location = new Point(2, 8);
+        // Save bar: Save applies every pending macro change, Revert discards them.
+        var saveBar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom, Height = 46, BackColor = _bgColor,
+            Padding = new Padding(0, 8, 0, 0), FlowDirection = FlowDirection.LeftToRight, WrapContents = false
+        };
+        _btnSave = CreateButton("\u2714 Save", BtnSave_Click);
         _btnSave.BackColor = Color.FromArgb(30, 100, 30);
         _btnSave.ForeColor = Color.FromArgb(180, 255, 180);
         _btnSave.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-        saveBar.Controls.Add(_btnSave);
+        _btnSave.Margin = new Padding(2, 0, 6, 0);
+        _btnRevert = CreateButton("\u21BA Revert", BtnRevert_Click);
+        _btnRevert.Margin = new Padding(0, 0, 12, 0);
+        _unsavedLabel = new Label
+        {
+            Text = "\u25CF Unsaved changes", AutoSize = true, Visible = false,
+            ForeColor = Color.FromArgb(206, 145, 120), Margin = new Padding(0, 7, 0, 0)
+        };
+        saveBar.Controls.AddRange(new Control[] { _btnSave, _btnRevert, _unsavedLabel });
 
         rightPanel.Controls.Add(_actionListView);
         rightPanel.Controls.Add(composer);
@@ -367,109 +380,156 @@ internal class LogForm : Form
         _macroContainer.Controls.Add(splitter);
         _macroContainer.Controls.Add(leftPanel);
 
-        RefreshMacroList();
+        LoadDraft();
     }
+
+    // ==================== Draft / Save ====================
+
+    public bool HasUnsavedChanges => _dirty;
+
+    // Rebuilds the draft from the saved macros, discarding unsaved edits.
+    private void LoadDraft(int selectIndex = -1)
+    {
+        _draft = _config.Config.Macros.Select(m => m.Clone()).ToList();
+        _macroList.BeginUpdate();
+        _macroList.Items.Clear();
+        foreach (var m in _draft)
+            _macroList.Items.Add(m);
+        _macroList.EndUpdate();
+
+        if (selectIndex >= 0 && _draft.Count > 0)
+            _macroList.SelectedIndex = Math.Min(selectIndex, _draft.Count - 1);
+        LoadSelectedMacro();
+        SetDirty(false);
+    }
+
+    private void SetDirty(bool dirty)
+    {
+        _dirty = dirty;
+        _unsavedLabel.Visible = dirty;
+        _btnRevert.Enabled = dirty;
+    }
+
+    // Applies the draft to the live hooks and writes config.json.
+    public async Task<bool> SaveMacrosAsync()
+    {
+        var previous = _config.Config.Macros;
+        var saved = _draft.Select(m => m.Clone()).ToList();
+        _config.Config.Macros = saved;
+        try
+        {
+            await _config.SaveConfigAsync();
+        }
+        catch (Exception ex)
+        {
+            _config.Config.Macros = previous;
+            MessageBox.Show($"Failed to save: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+
+        _hooks.SetMacros(saved);
+        SetDirty(false);
+        Services.Logger.LogSuccessStatic($"Saved {saved.Count} macro(s).");
+        return true;
+    }
+
+    private async void BtnSave_Click(object? sender, EventArgs e)
+    {
+        if (!await SaveMacrosAsync()) return;
+
+        _btnSave.Text = "\u2714 Saved!";
+        _ = Task.Delay(1500).ContinueWith(_ =>
+        {
+            if (!this.IsDisposed && this.IsHandleCreated)
+                this.BeginInvoke(() => _btnSave.Text = "\u2714 Save");
+        });
+    }
+
+    private void BtnRevert_Click(object? sender, EventArgs e) => LoadDraft(_macroList.SelectedIndex);
 
     // ==================== Macro List ====================
 
-    private void RefreshMacroList()
-    {
-        int sel = _macroList.SelectedIndex;
-        _macroList.Items.Clear();
-        foreach (var m in _macros)
-        {
-            _macroList.Items.Add($"{m.Name}  [{m.GetTriggerDisplay()}]");
-        }
-        if (sel >= 0 && sel < _macroList.Items.Count)
-            _macroList.SelectedIndex = sel;
-    }
-
     private void MacroList_DrawItem(object? sender, DrawItemEventArgs e)
     {
-        if (e.Index < 0) return;
+        if (e.Index < 0 || e.Index >= _macroList.Items.Count) return;
         bool selected = (e.State & DrawItemState.Selected) != 0;
         using var bgBrush = new SolidBrush(selected ? _accentColor : _bgColor);
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
         using var fgBrush = new SolidBrush(_fgColor);
-        var text = _macroList.Items[e.Index]?.ToString() ?? "";
-        e.Graphics.DrawString(text, e.Font!, fgBrush, e.Bounds.X + 8, e.Bounds.Y + 5);
+        var macro = (Macro)_macroList.Items[e.Index];
+        e.Graphics.DrawString($"{macro.Name}  [{macro.GetTriggerDisplay()}]", e.Font!, fgBrush, e.Bounds.X + 8, e.Bounds.Y + 5);
     }
 
-    private void MacroList_SelectedIndexChanged(object? sender, EventArgs e)
+    // Shows the selected macro in the editor. _loadingUI stops the field
+    // change handlers from treating this as a user edit.
+    private void LoadSelectedMacro()
     {
-        int idx = _macroList.SelectedIndex;
-        if (idx < 0 || idx >= _macros.Count)
+        _selectedMacro = _macroList.SelectedItem as Macro;
+        _loadingUI = true;
+        try
         {
-            _selectedMacro = null;
-            _nameBox.Text = "";
-            _chkCtrl.Checked = false;
-            _chkShift.Checked = false;
-            _chkAlt.Checked = false;
-            _triggerCombo.SelectedIndex = 0;
-            _editingActions.Clear();
-            _actionsHeader.Text = "Select a macro to edit actions";
-            RefreshActionList();
-            return;
+            _nameBox.Text = _selectedMacro?.Name ?? "";
+            LoadTriggerToUI(_selectedMacro?.TriggerKeys ?? []);
+            _actionsHeader.Text = _selectedMacro != null
+                ? $"ACTIONS  —  {_selectedMacro.Name}"
+                : "Select a macro to edit actions";
         }
-
-        _selectedMacro = _macros[idx];
-        _nameBox.Text = _selectedMacro.Name;
-        LoadTriggerToUI(_selectedMacro.TriggerKeys);
-
-        // Deep-copy actions for editing
-        _editingActions.Clear();
-        foreach (var a in _selectedMacro.Actions)
-            _editingActions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DurationMs = a.DurationMs, DelayMs = a.DelayMs });
-
-        _actionsHeader.Text = $"ACTIONS  —  {_selectedMacro.Name}";
+        finally
+        {
+            _loadingUI = false;
+        }
         RefreshActionList();
     }
 
     private void NameBox_TextChanged(object? sender, EventArgs e)
     {
-        if (_selectedMacro == null) return;
+        if (_loadingUI || _selectedMacro == null) return;
         _selectedMacro.Name = _nameBox.Text;
-        // Update list display without losing selection
-        int idx = _macroList.SelectedIndex;
-        if (idx >= 0)
-        {
-            _macroList.Items[idx] = $"{_selectedMacro.Name}  [{_selectedMacro.GetTriggerDisplay()}]";
-        }
+        _macroList.Invalidate();
         _actionsHeader.Text = $"ACTIONS  —  {_selectedMacro.Name}";
+        SetDirty(true);
     }
 
     // ==================== Add/Remove Macro ====================
 
     private void BtnAddMacro_Click(object? sender, EventArgs e)
     {
-        var macro = new Macro { Name = $"Macro {_macros.Count + 1}" };
-        _macros.Add(macro);
-        RefreshMacroList();
-        _macroList.SelectedIndex = _macros.Count - 1;
+        var macro = new Macro { Name = $"Macro {_draft.Count + 1}" };
+        _draft.Add(macro);
+        _macroList.Items.Add(macro);
+        _macroList.SelectedItem = macro;
+        SetDirty(true);
     }
 
     private void BtnRemoveMacro_Click(object? sender, EventArgs e)
     {
         if (_selectedMacro == null) return;
         int idx = _macroList.SelectedIndex;
-        _macros.Remove(_selectedMacro);
-        _selectedMacro = null;
-        RefreshMacroList();
-        if (_macros.Count > 0)
-            _macroList.SelectedIndex = Math.Min(idx, _macros.Count - 1);
+        _draft.Remove(_selectedMacro);
+        _macroList.Items.RemoveAt(idx);
+        if (_draft.Count > 0)
+            _macroList.SelectedIndex = Math.Min(idx, _draft.Count - 1);
+        LoadSelectedMacro();
+        SetDirty(true);
     }
 
     // ==================== Trigger Key Selection ====================
 
-    private static readonly ushort VK_LCONTROL = 0xA2;
-    private static readonly ushort VK_LSHIFT = 0xA0;
-    private static readonly ushort VK_LALT = 0xA4;
+    private const ushort VK_LCONTROL = 0xA2;
+    private const ushort VK_LSHIFT = 0xA0;
+    private const ushort VK_LALT = 0xA4;
 
-    private static readonly (string Name, ushort VK)[] _primaryKeys = BuildPrimaryKeyList();
+    // Buttons usable in actions: keyboard keys plus all mouse buttons.
+    private static readonly (string Name, ushort VK)[] _buttonKeys = BuildButtonList();
 
-    private static (string Name, ushort VK)[] BuildPrimaryKeyList()
+    // Trigger keys: "None" plus every action button except Left/Right/Middle
+    // click, which the mouse hook doesn't watch.
+    private static readonly (string Name, ushort VK)[] _triggerKeys =
+        [("None", 0), .. _buttonKeys.Where(k => k.VK is not (0x01 or 0x02 or 0x04))];
+
+    private static (string Name, ushort VK)[] BuildButtonList()
     {
-        var keys = new List<(string, ushort)> { ("None", 0) };
+        var keys = new List<(string, ushort)>();
 
         // Letters A-Z
         for (ushort vk = 0x41; vk <= 0x5A; vk++)
@@ -507,30 +567,22 @@ internal class LogForm : Form
     private void PopulateTriggerCombo()
     {
         _triggerCombo.Items.Clear();
-        foreach (var (name, _) in _primaryKeys)
+        foreach (var (name, _) in _triggerKeys)
             _triggerCombo.Items.Add(name);
         _triggerCombo.SelectedIndex = 0;
     }
 
     /// <summary>Load a TriggerKeys list into the modifier checkboxes + primary key combo.</summary>
-    private bool _suppressTriggerUpdate = false;
-
     private void LoadTriggerToUI(List<ushort> keys)
     {
-        _suppressTriggerUpdate = true;
         _chkCtrl.Checked = keys.Contains(VK_LCONTROL);
         _chkShift.Checked = keys.Contains(VK_LSHIFT);
         _chkAlt.Checked = keys.Contains(VK_LALT);
 
         // Find the primary key (not a modifier)
-        var primary = keys.FirstOrDefault(k => k != VK_LCONTROL && k != VK_LSHIFT && k != VK_LALT);
-        int idx = 0;
-        for (int i = 0; i < _primaryKeys.Length; i++)
-        {
-            if (_primaryKeys[i].VK == primary) { idx = i; break; }
-        }
-        _triggerCombo.SelectedIndex = idx;
-        _suppressTriggerUpdate = false;
+        var primary = keys.FirstOrDefault(k => k is not (VK_LCONTROL or VK_LSHIFT or VK_LALT));
+        int idx = Array.FindIndex(_triggerKeys, t => t.VK == primary);
+        _triggerCombo.SelectedIndex = Math.Max(0, idx);
     }
 
     /// <summary>Build TriggerKeys list from the current UI state.</summary>
@@ -542,18 +594,18 @@ internal class LogForm : Form
         if (_chkAlt.Checked) keys.Add(VK_LALT);
 
         int idx = _triggerCombo.SelectedIndex;
-        if (idx > 0 && idx < _primaryKeys.Length)
-            keys.Add(_primaryKeys[idx].VK);
+        if (idx > 0 && idx < _triggerKeys.Length)
+            keys.Add(_triggerKeys[idx].VK);
 
         return keys;
     }
 
     private void TriggerCombo_Changed(object? sender, EventArgs e)
     {
-        if (_suppressTriggerUpdate || _selectedMacro == null) return;
-        var newKeys = BuildTriggerKeysFromUI();
-        _selectedMacro.TriggerKeys = newKeys;
-        RefreshMacroList();
+        if (_loadingUI || _selectedMacro == null) return;
+        _selectedMacro.TriggerKeys = BuildTriggerKeysFromUI();
+        _macroList.Invalidate();
+        SetDirty(true);
     }
 
     // ==================== Action Composer ====================
@@ -561,25 +613,22 @@ internal class LogForm : Form
     private void PopulateButtonCombo()
     {
         _buttonCombo.Items.Clear();
-        foreach (var (name, vk) in _primaryKeys)
-        {
-            if (vk == 0) continue; // skip "None"
+        foreach (var (name, _) in _buttonKeys)
             _buttonCombo.Items.Add(name);
-        }
         _buttonCombo.Text = "";
     }
 
     /// <summary>Resolve the combo's text (typed or selected) to a virtual key code.</summary>
-    private bool TryResolveButton(string text, out ushort vk)
+    private static bool TryResolveButton(string text, out ushort vk)
     {
         vk = 0;
         text = text.Trim();
         if (text.Length == 0) return false;
 
         // Match a friendly name (case-insensitive)
-        foreach (var (name, v) in _primaryKeys)
+        foreach (var (name, v) in _buttonKeys)
         {
-            if (v != 0 && string.Equals(name, text, StringComparison.OrdinalIgnoreCase)) { vk = v; return true; }
+            if (string.Equals(name, text, StringComparison.OrdinalIgnoreCase)) { vk = v; return true; }
         }
 
         // Single character: letter or digit
@@ -610,9 +659,10 @@ internal class LogForm : Form
             ? new MacroAction { Type = MacroActionType.Hold, KeyCode = vk, DurationMs = (int)_durationNud.Value }
             : new MacroAction { Type = MacroActionType.Press, KeyCode = vk };
 
-        _editingActions.Add(action);
+        _selectedMacro.Actions.Add(action);
         RefreshActionList();
         SelectLastAction();
+        SetDirty(true);
     }
 
     private void BtnAddDelay_Click(object? sender, EventArgs e)
@@ -622,9 +672,10 @@ internal class LogForm : Form
             MessageBox.Show("Select or create a macro first.", "No macro selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        _editingActions.Add(new MacroAction { Type = MacroActionType.Delay, DelayMs = (int)_delayNud.Value });
+        _selectedMacro.Actions.Add(new MacroAction { Type = MacroActionType.Delay, DelayMs = (int)_delayNud.Value });
         RefreshActionList();
         SelectLastAction();
+        SetDirty(true);
     }
 
     private void SelectLastAction()
@@ -639,40 +690,48 @@ internal class LogForm : Form
 
     private void BtnRemoveAction_Click(object? sender, EventArgs e)
     {
-        if (_actionListView.SelectedIndices.Count == 0) return;
+        if (_selectedMacro == null || _actionListView.SelectedIndices.Count == 0) return;
+        var actions = _selectedMacro.Actions;
         int idx = _actionListView.SelectedIndices[0];
-        _editingActions.RemoveAt(idx);
+        actions.RemoveAt(idx);
         RefreshActionList();
-        if (_editingActions.Count > 0)
-            _actionListView.Items[Math.Min(idx, _editingActions.Count - 1)].Selected = true;
+        if (actions.Count > 0)
+            _actionListView.Items[Math.Min(idx, actions.Count - 1)].Selected = true;
+        SetDirty(true);
     }
 
     private void BtnMoveUp_Click(object? sender, EventArgs e)
     {
-        if (_actionListView.SelectedIndices.Count == 0) return;
+        if (_selectedMacro == null || _actionListView.SelectedIndices.Count == 0) return;
+        var actions = _selectedMacro.Actions;
         int idx = _actionListView.SelectedIndices[0];
         if (idx <= 0) return;
-        (_editingActions[idx], _editingActions[idx - 1]) = (_editingActions[idx - 1], _editingActions[idx]);
+        (actions[idx], actions[idx - 1]) = (actions[idx - 1], actions[idx]);
         RefreshActionList();
         _actionListView.Items[idx - 1].Selected = true;
+        SetDirty(true);
     }
 
     private void BtnMoveDown_Click(object? sender, EventArgs e)
     {
-        if (_actionListView.SelectedIndices.Count == 0) return;
+        if (_selectedMacro == null || _actionListView.SelectedIndices.Count == 0) return;
+        var actions = _selectedMacro.Actions;
         int idx = _actionListView.SelectedIndices[0];
-        if (idx >= _editingActions.Count - 1) return;
-        (_editingActions[idx], _editingActions[idx + 1]) = (_editingActions[idx + 1], _editingActions[idx]);
+        if (idx >= actions.Count - 1) return;
+        (actions[idx], actions[idx + 1]) = (actions[idx + 1], actions[idx]);
         RefreshActionList();
         _actionListView.Items[idx + 1].Selected = true;
+        SetDirty(true);
     }
 
     private void RefreshActionList()
     {
+        _actionListView.BeginUpdate();
         _actionListView.Items.Clear();
-        for (int i = 0; i < _editingActions.Count; i++)
+        var actions = _selectedMacro?.Actions ?? [];
+        for (int i = 0; i < actions.Count; i++)
         {
-            var a = _editingActions[i];
+            var a = actions[i];
             string button = a.Type is MacroActionType.Press or MacroActionType.Hold
                 ? MacroAction.GetKeyName(a.KeyCode) : "";
             string time = a.Type switch
@@ -684,31 +743,7 @@ internal class LogForm : Form
             var item = new ListViewItem(new[] { (i + 1).ToString(), a.Type.ToString(), button, time });
             _actionListView.Items.Add(item);
         }
-    }
-
-    // ==================== Save ====================
-
-    private async void BtnSave_Click(object? sender, EventArgs e)
-    {
-        if (_selectedMacro == null) return;
-        _selectedMacro.Actions.Clear();
-        foreach (var a in _editingActions)
-            _selectedMacro.Actions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DurationMs = a.DurationMs, DelayMs = a.DelayMs });
-
-        try
-        {
-            await _config.SaveConfigAsync();
-            _btnSave.Text = "\u2714 Saved!";
-            _ = Task.Delay(1500).ContinueWith(_ =>
-            {
-                if (!this.IsDisposed && this.IsHandleCreated)
-                    this.BeginInvoke(() => _btnSave.Text = "\u2714 Save Macro");
-            });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Failed to save: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        _actionListView.EndUpdate();
     }
 
     // ==================== Action ListView Custom Draw ====================
@@ -792,9 +827,8 @@ internal class LogForm : Form
         _richTextBox.AppendText($"{timestamp:HH:mm:ss} ");
         _richTextBox.SelectionColor = color;
         _richTextBox.AppendText($" {level.ToString().ToUpper().PadRight(7)} ");
-        string cleanMessage = _markupRegex.Replace(message, "");
         _richTextBox.SelectionColor = _fgColor;
-        _richTextBox.AppendText($"{cleanMessage}\n");
+        _richTextBox.AppendText($"{message}\n");
 
         if (_autoScroll)
         {

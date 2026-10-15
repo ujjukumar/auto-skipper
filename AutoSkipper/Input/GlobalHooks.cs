@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Linq;
 using AutoSkipper.Models;
 using AutoSkipper.Services;
 
@@ -11,6 +10,8 @@ internal class GlobalHooks : IDisposable
     private const int VK_F7 = 0x76;
     private const int VK_F8 = 0x77;
     private const int VK_F9 = 0x78;
+    private const ushort VK_XBUTTON1 = 0x05;
+    private const ushort VK_XBUTTON2 = 0x06;
 
     private readonly Native.HookProc _kbdProc;
     private readonly Native.HookProc _mouseProc;
@@ -18,13 +19,17 @@ internal class GlobalHooks : IDisposable
     private readonly IntPtr _hMouseHook = IntPtr.Zero;
     private readonly Services.AutoSkipper _skipper;
     private readonly Services.MacroService _macroService;
-    private readonly List<Macro> _macros;
+    private volatile Macro[] _macros = [];
 
-    public GlobalHooks(Services.AutoSkipper skipper, Services.MacroService macroService, List<Macro> macros)
+    // Physical key-down state. Low-level hooks get a fresh WM_KEYDOWN for every
+    // auto-repeat with no repeat flag, so this is how repeats are told apart.
+    private readonly bool[] _keysDown = new bool[256];
+
+    public GlobalHooks(Services.AutoSkipper skipper, Services.MacroService macroService, IEnumerable<Macro> macros)
     {
         _skipper = skipper;
         _macroService = macroService;
-        _macros = macros;
+        SetMacros(macros);
         _kbdProc = HookCallbackKbd;
         _mouseProc = HookCallbackMouse;
 
@@ -44,64 +49,85 @@ internal class GlobalHooks : IDisposable
         }
     }
 
+    // Replaces the active macros with a private copy, so edits in the macro
+    // editor only take effect once they are saved.
+    public void SetMacros(IEnumerable<Macro> macros) => _macros = macros.Select(m => m.Clone()).ToArray();
+
     private IntPtr HookCallbackKbd(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
         {
-            var hookStruct = Marshal.PtrToStructure<Native.KBDLLHOOKSTRUCT>(lParam);
-            int vkCode = (int)hookStruct.vkCode;
-            // Keys pressed while Alt is held arrive as WM_SYSKEYDOWN, not WM_KEYDOWN.
-            bool isKeyDown = wParam == (IntPtr)Native.WM_KEYDOWN || wParam == (IntPtr)Native.WM_SYSKEYDOWN;
-            bool injected = (hookStruct.flags & Native.LLKHF_INJECTED) != 0;
-
-            // --- Normal mode --- (ignore our own injected input to avoid macro re-trigger loops)
-            if (isKeyDown && !injected)
-            {
-                switch (vkCode)
-                {
-                    case VK_F7: Logger.ToggleFileLogging(); break;
-                    case VK_F8: _skipper.ToggleRun(true); break;
-                    case VK_F9: _skipper.ToggleRun(false); break;
-                    default:
-                        var macro = FindMatchingMacro((ushort)vkCode);
-                        if (macro != null)
-                        {
-                            _ = _macroService.ExecuteMacroAsync(macro);
-                        }
-                        break;
-                }
-            }
+            // An exception escaping a native callback would crash the process.
+            try { HandleKeyboard((int)wParam, lParam); }
+            catch (Exception ex) { Logger.LogErrorStatic($"Keyboard hook error: {ex.Message}"); }
         }
         return Native.CallNextHookEx(_hKbdHook, nCode, wParam, lParam);
+    }
+
+    private void HandleKeyboard(int msg, IntPtr lParam)
+    {
+        var hookStruct = Marshal.PtrToStructure<Native.KBDLLHOOKSTRUCT>(lParam);
+
+        // Ignore our own injected input to avoid macro re-trigger loops.
+        if ((hookStruct.flags & Native.LLKHF_INJECTED) != 0) return;
+
+        int vkCode = (int)hookStruct.vkCode;
+        if ((uint)vkCode >= _keysDown.Length) return;
+
+        if (msg is Native.WM_KEYUP or Native.WM_SYSKEYUP)
+        {
+            _keysDown[vkCode] = false;
+            return;
+        }
+
+        // Keys pressed while Alt is held arrive as WM_SYSKEYDOWN, not WM_KEYDOWN.
+        if (msg is not (Native.WM_KEYDOWN or Native.WM_SYSKEYDOWN)) return;
+        if (_keysDown[vkCode]) return; // auto-repeat while held
+        _keysDown[vkCode] = true;
+
+        switch (vkCode)
+        {
+            case VK_F7: Logger.ToggleFileLogging(); break;
+            case VK_F8: _skipper.ToggleRun(true); break;
+            case VK_F9: _skipper.ToggleRun(false); break;
+            default: TryRunMacro((ushort)vkCode); break;
+        }
     }
 
     private IntPtr HookCallbackMouse(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
         {
-            int msg = (int)wParam;
-
-            // --- Normal mode ---
-            if (msg == Native.WM_XBUTTONDOWN)
-            {
-                var hookStruct = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
-                // Ignore our own injected input so macro-sent clicks don't trigger
-                // the Mouse4/Mouse5 remaps or re-trigger macros.
-                if ((hookStruct.flags & Native.LLMHF_INJECTED) == 0)
-                {
-                    int btn = (int)(hookStruct.mouseData >> 16);
-                    if (btn == 1) _skipper.HandleMouse4();
-                    if (btn == 2) _skipper.HandleMouse5();
-
-                    // Check macro combos that include mouse buttons
-                    ushort mouseVk = btn == 1 ? (ushort)0x05 : (ushort)0x06;
-                    var macro = FindMatchingMacro(mouseVk);
-                    if (macro != null)
-                        _ = _macroService.ExecuteMacroAsync(macro);
-                }
-            }
+            try { HandleMouse((int)wParam, lParam); }
+            catch (Exception ex) { Logger.LogErrorStatic($"Mouse hook error: {ex.Message}"); }
         }
         return Native.CallNextHookEx(_hMouseHook, nCode, wParam, lParam);
+    }
+
+    private void HandleMouse(int msg, IntPtr lParam)
+    {
+        if (msg != Native.WM_XBUTTONDOWN) return;
+
+        var hookStruct = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
+        // Ignore our own injected input so macro-sent clicks don't trigger
+        // the Mouse4/Mouse5 remaps or re-trigger macros.
+        if ((hookStruct.flags & Native.LLMHF_INJECTED) != 0) return;
+
+        int btn = (int)(hookStruct.mouseData >> 16);
+        if (btn == 1) _skipper.HandleMouse4();
+        else if (btn == 2) _skipper.HandleMouse5();
+        else return;
+
+        // Check macro combos that include mouse buttons
+        TryRunMacro(btn == 1 ? VK_XBUTTON1 : VK_XBUTTON2);
+    }
+
+    private void TryRunMacro(ushort justPressed)
+    {
+        var macro = FindMatchingMacro(justPressed);
+        // Macros only fire while the game is focused, so typing elsewhere can't trigger them.
+        if (macro != null && _skipper.IsGameActive())
+            _macroService.Run(macro);
     }
 
     /// <summary>

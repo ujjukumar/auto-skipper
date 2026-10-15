@@ -36,7 +36,12 @@ internal static partial class Native
     public static partial IntPtr DispatchMessage(in MSG lpMsg);
 
     // Input
-    [LibraryImport("user32.dll")] public static partial uint SendInput(uint nInputs, [In] Input[] pInputs, int cbSize);
+    [LibraryImport("user32.dll")] public static partial uint SendInput(uint nInputs, ReadOnlySpan<Input> pInputs, int cbSize);
+
+    // Icons
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool DestroyIcon(IntPtr hIcon);
 
     public const int WH_KEYBOARD_LL = 13;
     public const int WH_MOUSE_LL = 14;

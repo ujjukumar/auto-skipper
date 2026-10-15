@@ -10,11 +10,13 @@ public enum MacroActionType
 public class MacroAction
 {
     public MacroActionType Type { get; set; }
-    public ushort KeyCode { get; set; } // For Press / Hold (mouse: 0x01 L, 0x02 R, 0x04 M)
+    public ushort KeyCode { get; set; } // For Press / Hold (mouse: 0x01 L, 0x02 R, 0x04 M, 0x05 X1, 0x06 X2)
     public int DurationMs { get; set; } // For Hold
     public int DelayMs { get; set; }    // For Delay
 
-    public bool IsMouseButton => KeyCode is 0x01 or 0x02 or 0x04 or 0x05 or 0x06;
+    public static bool IsMouseKey(ushort vkCode) => vkCode is 0x01 or 0x02 or 0x04 or 0x05 or 0x06;
+
+    public MacroAction Clone() => new() { Type = Type, KeyCode = KeyCode, DurationMs = DurationMs, DelayMs = DelayMs };
 
     public string GetDescription() => Type switch
     {

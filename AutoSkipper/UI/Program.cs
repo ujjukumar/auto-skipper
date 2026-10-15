@@ -1,3 +1,4 @@
+using System.Drawing.Drawing2D;
 using AutoSkipper.Interfaces;
 using AutoSkipper.Models;
 
@@ -38,8 +39,10 @@ internal class AutoSkipperContext : ApplicationContext
     private readonly Input.GlobalHooks? _hooks;
     private readonly Thread? _logicThread;
     private readonly LogForm _logForm;
+    private readonly SynchronizationContext _ui;
     private Icon _defaultIcon = SystemIcons.Application;
-    private Icon _activeIcon = SystemIcons.Asterisk;
+    private Icon _activeIcon = SystemIcons.Application;
+    private bool _inDialogue = false;
     private bool _cleanupDone = false;
     private readonly ILogger _logger;
 
@@ -51,13 +54,14 @@ internal class AutoSkipperContext : ApplicationContext
         _notifyIcon = new NotifyIcon
         {
             Icon = _defaultIcon,
-            Text = "Genshin AutoSkipper - Ready",
+            Text = "Genshin AutoSkipper",
             Visible = true
         };
 
-        var macroService = new Services.MacroService(new Input.InputSender(), _logger);
+        var inputSender = new Input.InputSender();
+        var macroService = new Services.MacroService(inputSender, _logger);
         
-        _skipper = new Services.AutoSkipper(config, _logger, new Input.InputSender());
+        _skipper = new Services.AutoSkipper(config, _logger, inputSender);
         try
         {
             _hooks = new Input.GlobalHooks(_skipper, macroService, config.Config.Macros);
@@ -70,7 +74,11 @@ internal class AutoSkipperContext : ApplicationContext
             throw new InvalidOperationException($"Failed to initialize global hooks: {ex.Message}", ex);
         }
 
-        _logForm = new LogForm(config.Config.Macros, _hooks, config, _defaultIcon);
+        _logForm = new LogForm(config, _hooks, _defaultIcon);
+
+        // Skipper events can fire on the logic thread; tray updates are posted to
+        // the UI thread. Creating the form above installed the WinForms context.
+        _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
         var contextMenu = new ContextMenuStrip();
         
@@ -100,12 +108,27 @@ internal class AutoSkipperContext : ApplicationContext
             IsBackground = true
         };
         _logicThread.Start();
-        
+
+        UpdateTray();
         _logger.LogSuccess("AutoSkipper started minimized to tray.");
         _logger.Log("Use F8/F9 or Tray Icon to control.");
     }
 
     private void LoadIcons()
+    {
+        LoadDefaultIcon();
+        try
+        {
+            _activeIcon = CreateActiveIcon(_defaultIcon);
+        }
+        catch (Exception ex)
+        {
+            _activeIcon = _defaultIcon;
+            _logger.LogWarning($"Failed to create active icon: {ex.Message}");
+        }
+    }
+
+    private void LoadDefaultIcon()
     {
         string appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AutoSkipper");
         string iconPath = Path.Combine(appDataPath, "auto_marker.ico");
@@ -119,7 +142,6 @@ internal class AutoSkipperContext : ApplicationContext
             {
                 using var stream = File.OpenRead(iconPath);
                 _defaultIcon = new Icon(stream);
-                _activeIcon = _defaultIcon;
                 return;
             }
             catch (Exception ex)
@@ -135,11 +157,7 @@ internal class AutoSkipperContext : ApplicationContext
             if (!string.IsNullOrEmpty(exePath))
             {
                 Icon? embedded = Icon.ExtractAssociatedIcon(exePath);
-                if (embedded != null)
-                {
-                    _defaultIcon = embedded;
-                    _activeIcon = embedded;
-                }
+                if (embedded != null) _defaultIcon = embedded;
             }
         }
         catch (Exception ex)
@@ -148,21 +166,55 @@ internal class AutoSkipperContext : ApplicationContext
         }
     }
 
+    // The default icon with a green dot in the corner, shown while skipping dialogue.
+    private static Icon CreateActiveIcon(Icon baseIcon)
+    {
+        using var bmp = baseIcon.ToBitmap();
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int d = Math.Max(6, bmp.Width * 9 / 20);
+            var dot = new Rectangle(bmp.Width - d - 1, bmp.Height - d - 1, d, d);
+            using var fill = new SolidBrush(Color.FromArgb(0, 200, 83));
+            using var outline = new Pen(Color.FromArgb(20, 20, 20), Math.Max(1f, bmp.Width / 16f));
+            g.FillEllipse(fill, dot);
+            g.DrawEllipse(outline, dot);
+        }
+
+        IntPtr hIcon = bmp.GetHicon();
+        try
+        {
+            using var temp = Icon.FromHandle(hIcon);
+            return (Icon)temp.Clone();
+        }
+        finally
+        {
+            Services.Native.DestroyIcon(hIcon);
+        }
+    }
+
     private void OnDialogueStateChanged(bool inDialogue)
     {
-        _notifyIcon.Icon = inDialogue ? _activeIcon : _defaultIcon;
-        UpdateTooltip();
+        _ui.Post(_ =>
+        {
+            _inDialogue = inDialogue;
+            UpdateTray();
+        }, null);
     }
 
     private void OnRunningStateChanged(bool running)
     {
-        UpdateTooltip();
+        _ui.Post(_ => UpdateTray(), null);
     }
 
-    private void UpdateTooltip()
+    private void UpdateTray()
     {
-        string status = _skipper.IsRunning ? "Running" : "Paused";
-        _notifyIcon.Text = $"Genshin AutoSkipper - {status}";
+        if (_cleanupDone) return;
+        bool running = _skipper.IsRunning;
+        _notifyIcon.Icon = running && _inDialogue ? _activeIcon : _defaultIcon;
+        _notifyIcon.Text = !running ? "Genshin AutoSkipper - Paused (F8 to start)"
+            : _inDialogue ? "Genshin AutoSkipper - Skipping dialogue"
+            : "Genshin AutoSkipper - Running";
     }
 
     private void ShowLogs()
@@ -181,8 +233,16 @@ internal class AutoSkipperContext : ApplicationContext
         }
     }
 
-    private void Exit(object? sender, EventArgs e)
+    private async void Exit(object? sender, EventArgs e)
     {
+        if (_logForm.HasUnsavedChanges)
+        {
+            var result = MessageBox.Show("You have unsaved macro changes. Save them before exiting?",
+                "AutoSkipper", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (result == DialogResult.Cancel) return;
+            if (result == DialogResult.Yes && !await _logForm.SaveMacrosAsync()) return;
+        }
+
         Cleanup();
         Application.Exit();
     }
@@ -214,6 +274,7 @@ internal class AutoSkipperContext : ApplicationContext
         {
             Cleanup();
             _notifyIcon.Dispose();
+            if (!ReferenceEquals(_activeIcon, _defaultIcon)) _activeIcon.Dispose();
         }
         base.Dispose(disposing);
     }

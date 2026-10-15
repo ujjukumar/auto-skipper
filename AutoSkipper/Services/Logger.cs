@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Text;
-using System.Text.RegularExpressions;
 using AutoSkipper.Interfaces;
 
 namespace AutoSkipper.Services;
@@ -36,9 +35,8 @@ public class Logger : ILogger
     private static readonly object _historyLock = new();
 
     private static bool _verbose = false;
-    private static volatile StreamWriter? _logWriter; // Volatile for thread-safe reads
-    private static readonly object _fileLock = new(); // Lock for creating/disposing the writer
-    private static readonly Regex _markupRegex = new(@"\[/?[^\]]*\]", RegexOptions.Compiled);
+    private static StreamWriter? _logWriter; // Only accessed under _fileLock
+    private static readonly object _fileLock = new();
 
     static Logger()
     {
@@ -62,8 +60,6 @@ public class Logger : ILogger
                 string timestamp = $"{entry.Timestamp:HH:mm:ss.fff}";
                 string level = entry.Level.ToString().ToUpper();
                 
-                string plainMessage = _markupRegex.Replace(entry.Message, "");
-                
                 // Color output to console
                 Console.ForegroundColor = entry.Level switch
                 {
@@ -75,14 +71,19 @@ public class Logger : ILogger
                     _ => ConsoleColor.White
                 };
                 
-                Console.WriteLine($"{timestamp} | {level} | {plainMessage}");
+                Console.WriteLine($"{timestamp} | {level} | {entry.Message}");
                 Console.ResetColor();
                 
-                // File logging remains plain text (strip Spectre markup)
-                var writer = _logWriter;
-                if (writer != null)
+                // Written under the lock so F7 can't dispose the writer mid-write.
+                // Flushing when the queue drains keeps the file current without
+                // flushing on every line during bursts.
+                lock (_fileLock)
                 {
-                    writer.WriteLine($"{entry.Timestamp:HH:mm:ss.fff} | {level} | {plainMessage}");
+                    if (_logWriter != null)
+                    {
+                        _logWriter.WriteLine($"{timestamp} | {level} | {entry.Message}");
+                        if (_logQueue.Count == 0) _logWriter.Flush();
+                    }
                 }
             }
             catch (Exception ex)
