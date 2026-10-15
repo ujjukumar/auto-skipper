@@ -60,14 +60,8 @@ internal class InputSender : IInputSender
     {
         lock (_inputLock)
         {
-            _inputPool[0].type = Native.INPUT_MOUSE;
-            _inputPool[0].u.mi.dwFlags = Native.MOUSEEVENTF_LEFTDOWN;
-            _inputPool[0].u.mi.dwExtraInfo = IntPtr.Zero;
-
-            _inputPool[1].type = Native.INPUT_MOUSE;
-            _inputPool[1].u.mi.dwFlags = Native.MOUSEEVENTF_LEFTUP;
-            _inputPool[1].u.mi.dwExtraInfo = IntPtr.Zero;
-
+            SetMouse(0, Native.MOUSEEVENTF_LEFTDOWN);
+            SetMouse(1, Native.MOUSEEVENTF_LEFTUP);
             Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
         }
     }
@@ -76,15 +70,52 @@ internal class InputSender : IInputSender
     {
         lock (_inputLock)
         {
-            _inputPool[0].type = Native.INPUT_MOUSE;
-            _inputPool[0].u.mi.dwFlags = Native.MOUSEEVENTF_RIGHTDOWN;
-            _inputPool[0].u.mi.dwExtraInfo = IntPtr.Zero;
-
-            _inputPool[1].type = Native.INPUT_MOUSE;
-            _inputPool[1].u.mi.dwFlags = Native.MOUSEEVENTF_RIGHTUP;
-            _inputPool[1].u.mi.dwExtraInfo = IntPtr.Zero;
-
+            SetMouse(0, Native.MOUSEEVENTF_RIGHTDOWN);
+            SetMouse(1, Native.MOUSEEVENTF_RIGHTUP);
             Native.SendInput(2, _inputPool, Marshal.SizeOf<Native.Input>());
         }
     }
+
+    public void MouseDown(ushort vkCode)
+    {
+        var (flags, data) = MouseEvent(vkCode, down: true);
+        lock (_inputLock)
+        {
+            SetMouse(0, flags, data);
+            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
+
+    public void MouseUp(ushort vkCode)
+    {
+        var (flags, data) = MouseEvent(vkCode, down: false);
+        lock (_inputLock)
+        {
+            SetMouse(0, flags, data);
+            Native.SendInput(1, _inputPool, Marshal.SizeOf<Native.Input>());
+        }
+    }
+
+    // Fully initialises a mouse input slot. Zeroing dx/dy is required because the
+    // pool is shared with keyboard input via a union and can carry stale values
+    // that would otherwise move the cursor. mouseData selects the X button.
+    private void SetMouse(int index, uint flags, uint mouseData = 0)
+    {
+        _inputPool[index].type = Native.INPUT_MOUSE;
+        _inputPool[index].u.mi.dx = 0;
+        _inputPool[index].u.mi.dy = 0;
+        _inputPool[index].u.mi.mouseData = mouseData;
+        _inputPool[index].u.mi.time = 0;
+        _inputPool[index].u.mi.dwFlags = flags;
+        _inputPool[index].u.mi.dwExtraInfo = IntPtr.Zero;
+    }
+
+    private static (uint flags, uint mouseData) MouseEvent(ushort vkCode, bool down) => vkCode switch
+    {
+        0x02 => (down ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_RIGHTUP, 0u),
+        0x04 => (down ? Native.MOUSEEVENTF_MIDDLEDOWN : Native.MOUSEEVENTF_MIDDLEUP, 0u),
+        0x05 => (down ? Native.MOUSEEVENTF_XDOWN : Native.MOUSEEVENTF_XUP, Native.XBUTTON1),
+        0x06 => (down ? Native.MOUSEEVENTF_XDOWN : Native.MOUSEEVENTF_XUP, Native.XBUTTON2),
+        _ => (down ? Native.MOUSEEVENTF_LEFTDOWN : Native.MOUSEEVENTF_LEFTUP, 0u)
+    };
 }

@@ -11,8 +11,7 @@ internal class GlobalHooks : IDisposable
     private const int VK_F7 = 0x76;
     private const int VK_F8 = 0x77;
     private const int VK_F9 = 0x78;
-    private const int VK_ESCAPE = 0x1B;
-    
+
     private readonly Native.HookProc _kbdProc;
     private readonly Native.HookProc _mouseProc;
     private readonly IntPtr _hKbdHook = IntPtr.Zero;
@@ -20,19 +19,6 @@ internal class GlobalHooks : IDisposable
     private readonly Services.AutoSkipper _skipper;
     private readonly Services.MacroService _macroService;
     private readonly List<Macro> _macros;
-
-    // Recording state
-    public bool IsRecordingTrigger { get; set; }
-    public bool IsRecordingActions { get; set; }
-
-    /// <summary>Fires when a key/mouse button is pressed during trigger recording. Param: virtual key code.</summary>
-    public event Action<ushort>? OnTriggerKeyRecorded;
-
-    /// <summary>Fires for each input during action recording. Params: actionType, vkCode (0 for clicks).</summary>
-    public event Action<MacroActionType, ushort>? OnActionInputRecorded;
-
-    /// <summary>Fires when Escape is pressed during action recording to signal stop.</summary>
-    public event Action? OnRecordingStopped;
 
     public GlobalHooks(Services.AutoSkipper skipper, Services.MacroService macroService, List<Macro> macros)
     {
@@ -64,38 +50,12 @@ internal class GlobalHooks : IDisposable
         {
             var hookStruct = Marshal.PtrToStructure<Native.KBDLLHOOKSTRUCT>(lParam);
             int vkCode = (int)hookStruct.vkCode;
-            bool isKeyDown = wParam == (IntPtr)Native.WM_KEYDOWN;
-            bool isKeyUp = wParam == (IntPtr)Native.WM_KEYUP;
+            // Keys pressed while Alt is held arrive as WM_SYSKEYDOWN, not WM_KEYDOWN.
+            bool isKeyDown = wParam == (IntPtr)Native.WM_KEYDOWN || wParam == (IntPtr)Native.WM_SYSKEYDOWN;
+            bool injected = (hookStruct.flags & Native.LLKHF_INJECTED) != 0;
 
-            // --- Trigger recording mode ---
-            if (IsRecordingTrigger && isKeyDown)
-            {
-                IsRecordingTrigger = false;
-                OnTriggerKeyRecorded?.Invoke((ushort)vkCode);
-                return (IntPtr)1; // Suppress the key
-            }
-
-            // --- Action recording mode ---
-            if (IsRecordingActions)
-            {
-                // Escape stops recording
-                if (vkCode == VK_ESCAPE && isKeyDown)
-                {
-                    IsRecordingActions = false;
-                    OnRecordingStopped?.Invoke();
-                    return (IntPtr)1;
-                }
-
-                if (isKeyDown)
-                    OnActionInputRecorded?.Invoke(MacroActionType.KeyDown, (ushort)vkCode);
-                else if (isKeyUp)
-                    OnActionInputRecorded?.Invoke(MacroActionType.KeyUp, (ushort)vkCode);
-
-                return (IntPtr)1; // Suppress
-            }
-
-            // --- Normal mode ---
-            if (isKeyDown)
+            // --- Normal mode --- (ignore our own injected input to avoid macro re-trigger loops)
+            if (isKeyDown && !injected)
             {
                 switch (vkCode)
                 {
@@ -121,50 +81,24 @@ internal class GlobalHooks : IDisposable
         {
             int msg = (int)wParam;
 
-            // --- Trigger recording: capture mouse buttons too ---
-            if (IsRecordingTrigger)
-            {
-                if (msg == Native.WM_XBUTTONDOWN)
-                {
-                    var hookStruct = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
-                    int btn = (int)(hookStruct.mouseData >> 16);
-                    ushort vk = btn == 1 ? (ushort)0x05 : (ushort)0x06; // VK_XBUTTON1 / VK_XBUTTON2
-                    IsRecordingTrigger = false;
-                    OnTriggerKeyRecorded?.Invoke(vk);
-                    return (IntPtr)1;
-                }
-                // Don't capture left/right click as triggers — too easy to accidentally set
-            }
-
-            // --- Action recording: capture clicks ---
-            if (IsRecordingActions)
-            {
-                if (msg == Native.WM_LBUTTONDOWN)
-                {
-                    OnActionInputRecorded?.Invoke(MacroActionType.LeftClick, 0);
-                    return (IntPtr)1;
-                }
-                if (msg == (int)0x0204) // WM_RBUTTONDOWN
-                {
-                    OnActionInputRecorded?.Invoke(MacroActionType.RightClick, 0);
-                    return (IntPtr)1;
-                }
-                return Native.CallNextHookEx(_hMouseHook, nCode, wParam, lParam);
-            }
-
             // --- Normal mode ---
             if (msg == Native.WM_XBUTTONDOWN)
             {
                 var hookStruct = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
-                int btn = (int)(hookStruct.mouseData >> 16);
-                if (btn == 1) _skipper.HandleMouse4();
-                if (btn == 2) _skipper.HandleMouse5();
+                // Ignore our own injected input so macro-sent clicks don't trigger
+                // the Mouse4/Mouse5 remaps or re-trigger macros.
+                if ((hookStruct.flags & Native.LLMHF_INJECTED) == 0)
+                {
+                    int btn = (int)(hookStruct.mouseData >> 16);
+                    if (btn == 1) _skipper.HandleMouse4();
+                    if (btn == 2) _skipper.HandleMouse5();
 
-                // Check macro combos that include mouse buttons
-                ushort mouseVk = btn == 1 ? (ushort)0x05 : (ushort)0x06;
-                var macro = FindMatchingMacro(mouseVk);
-                if (macro != null)
-                    _ = _macroService.ExecuteMacroAsync(macro);
+                    // Check macro combos that include mouse buttons
+                    ushort mouseVk = btn == 1 ? (ushort)0x05 : (ushort)0x06;
+                    var macro = FindMatchingMacro(mouseVk);
+                    if (macro != null)
+                        _ = _macroService.ExecuteMacroAsync(macro);
+                }
             }
         }
         return Native.CallNextHookEx(_hMouseHook, nCode, wParam, lParam);

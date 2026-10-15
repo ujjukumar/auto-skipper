@@ -9,4 +9,6 @@ public interface IInputSender
     void KeyUp(ushort vkCode);
     void LeftClick();
     void RightClick();
+    void MouseDown(ushort vkCode);
+    void MouseUp(ushort vkCode);
 }

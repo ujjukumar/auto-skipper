@@ -59,7 +59,18 @@ internal class AutoSkipper : IDisposable
     private const double BreakDurationMax = 8.0;
     private const int BurstModeDelayMs = 120;
     private const int InactivePauseSeconds = 120;
+
+    // Dialogue debounce: how many consecutive raw pixel readings are required
+    // before the authoritative dialogue state flips. Entering requires more
+    // confirmations to suppress single-frame false positives; exiting stays
+    // responsive so presses stop quickly when a dialogue actually ends.
+    private const int DialogueEnterConfirm = 2;
+    private const int DialogueExitConfirm = 2;
+
     private bool _inDialogue = false;
+    private bool _lastRawDialogue = false;
+    private int _dialoguePositiveStreak = 0;
+    private int _dialogueNegativeStreak = 0;
     private bool _windowActive = false;
     private static ReadOnlySpan<char> GenshinWindowTitle => "Genshin Impact".AsSpan();
 
@@ -118,6 +129,30 @@ internal class AutoSkipper : IDisposable
     }
 
     private static double GetTime() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+
+    // Single raw pixel sample of the current dialogue state (no debounce).
+    private bool DetectDialogueRaw()
+    {
+        uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
+        bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
+
+        if (_logger.IsVerbose)
+            _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
+
+        if (isPlaying) return true;
+
+        uint pLoad = GetPixelWithRetry(_cfg.LOADING_PIXEL.x, _cfg.LOADING_PIXEL.y);
+        if (ColorsMatch(pLoad, 255, 255, 255)) return false;
+
+        uint pLow = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.ly);
+        uint pHigh = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.hy);
+        bool isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
+
+        if (_logger.IsVerbose)
+            _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
+
+        return isChoice;
+    }
 
     private double NextKeyInterval()
     {
@@ -192,6 +227,20 @@ internal class AutoSkipper : IDisposable
                     string countLog = GetCountLog();
                     ResetCounter();
                     _logger.Log(isActive ? $"Window State: ACTIVE{countLog}" : $"Window State: INACTIVE{countLog}");
+
+                    // Reset detection state when the game loses focus so stale
+                    // dialogue state can't trigger a press when it returns.
+                    if (!isActive)
+                    {
+                        _lastRawDialogue = false;
+                        _dialoguePositiveStreak = 0;
+                        _dialogueNegativeStreak = 0;
+                        if (_inDialogue)
+                        {
+                            _inDialogue = false;
+                            OnDialogueStateChanged?.Invoke(false);
+                        }
+                    }
                 }
 
                 if (!isActive)
@@ -230,50 +279,49 @@ internal class AutoSkipper : IDisposable
                 // Dialogue detection
                 if (now >= nextStateCheck || actionDue)
                 {
-                    uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
-                    bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
+                    bool rawDialogue = DetectDialogueRaw();
+                    _lastRawDialogue = rawDialogue;
 
-                    if (_logger.IsVerbose)
-                        _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
-                    
-                    bool isChoice = false;
-                    if (!isPlaying)
+                    if (rawDialogue)
                     {
-                        uint pLoad = GetPixelWithRetry(_cfg.LOADING_PIXEL.x, _cfg.LOADING_PIXEL.y);
-                        if (!ColorsMatch(pLoad, 255, 255, 255))
-                        {
-                            uint pLow = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.ly);
-                            uint pHigh = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.hy);
-                            isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
-
-                            if (_logger.IsVerbose)
-                                _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
-                        }
+                        _dialoguePositiveStreak++;
+                        _dialogueNegativeStreak = 0;
+                    }
+                    else
+                    {
+                        _dialogueNegativeStreak++;
+                        _dialoguePositiveStreak = 0;
                     }
 
-                    bool isDialogue = isPlaying || isChoice;
-                    if (isDialogue != _inDialogue)
+                    // Debounced transitions: only flip authoritative state after
+                    // enough consecutive confirming readings.
+                    if (!_inDialogue && _dialoguePositiveStreak >= DialogueEnterConfirm)
                     {
-                        _inDialogue = isDialogue;
-                        OnDialogueStateChanged?.Invoke(isDialogue);
+                        _inDialogue = true;
+                        OnDialogueStateChanged?.Invoke(true);
                         string countLog = GetCountLog();
                         ResetCounter();
-                        _logger.Log(isDialogue ? $"Dialogue State: DETECTED{countLog}" : $"Dialogue State: ENDED{countLog}");
+                        _logger.Log($"Dialogue State: DETECTED{countLog}");
+                    }
+                    else if (_inDialogue && _dialogueNegativeStreak >= DialogueExitConfirm)
+                    {
+                        _inDialogue = false;
+                        OnDialogueStateChanged?.Invoke(false);
+                        string countLog = GetCountLog();
+                        ResetCounter();
+                        _logger.Log($"Dialogue State: ENDED{countLog}");
 
                         // Drop any pending humanization/burst state when dialogue ends so
                         // it can't carry over and fire presses into the next dialogue.
-                        if (!isDialogue)
-                        {
-                            _burstMode = false;
-                            _burstRemaining = 0;
-                            _skipNext = false;
-                            _doubleNext = false;
-                            _burstPool = 0;
-                        }
+                        _burstMode = false;
+                        _burstRemaining = 0;
+                        _skipNext = false;
+                        _doubleNext = false;
+                        _burstPool = 0;
                     }
 
-                    nextStateCheck = now + (isDialogue ? ActiveDialogueCheckInterval : StateCheckInterval);
-                    if (!isDialogue)
+                    nextStateCheck = now + (_inDialogue ? ActiveDialogueCheckInterval : StateCheckInterval);
+                    if (!_inDialogue)
                     {
                         SleepUntil(now + IdleSleepInterval);
                         continue;
@@ -287,10 +335,11 @@ internal class AutoSkipper : IDisposable
                     continue;
                 }
 
-                // Action. actionDue was computed above; the detection block runs
-                // whenever it is set, so reaching here means a fresh check confirmed
-                // dialogue this iteration. The _inDialogue guard is defensive.
-                if (actionDue && _inDialogue)
+                // Action. A press only fires when the debounced state says we are in
+                // dialogue AND the most recent raw reading (taken this iteration when
+                // actionDue) still confirms it, so presses cannot trail past the end
+                // of a dialogue.
+                if (actionDue && _inDialogue && _lastRawDialogue)
                 {
                     double r1 = Random.Shared.NextDouble();
                     double r2 = Random.Shared.NextDouble();

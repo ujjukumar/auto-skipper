@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using System.Diagnostics;
 using AutoSkipper.Input;
 using AutoSkipper.Models;
 
@@ -48,12 +47,14 @@ internal class LogForm : Form
     // --- Action editor (right) ---
     private ListView _actionListView = null!;
     private Label _actionsHeader = null!;
-    private Button _btnRecordActions = null!;
     private Button _btnSave = null!;
 
-    // --- Recording state ---
-    private Stopwatch? _recordStopwatch;
-    private long _lastActionTimeMs;
+    // --- Action composer ---
+    private ComboBox _buttonCombo = null!;
+    private RadioButton _radioPress = null!;
+    private RadioButton _radioHold = null!;
+    private NumericUpDown _durationNud = null!;
+    private NumericUpDown _delayNud = null!;
 
     public LogForm(List<Macro> macros, GlobalHooks hooks, ScreenConfig config, Icon? icon = null)
     {
@@ -62,8 +63,8 @@ internal class LogForm : Form
         _config = config;
 
         this.Text = "AutoSkipper";
-        this.Size = new Size(820, 560);
-        this.MinimumSize = new Size(720, 480);
+        this.Size = new Size(900, 580);
+        this.MinimumSize = new Size(840, 520);
         this.Icon = icon ?? SystemIcons.Application;
         this.ShowInTaskbar = false;
         this.BackColor = _bgColor;
@@ -146,10 +147,6 @@ internal class LogForm : Form
                 this.WindowState = FormWindowState.Normal;
             }
         };
-
-        // Hook recording events
-        _hooks.OnActionInputRecorded += OnActionInputRecorded;
-        _hooks.OnRecordingStopped += OnRecordingStopped;
     }
 
     // ==================== Tab Switching ====================
@@ -285,51 +282,84 @@ internal class LogForm : Form
             Font = new Font("Segoe UI", 9.5f), HeaderStyle = ColumnHeaderStyle.Nonclickable,
             GridLines = false, MultiSelect = false
         };
-        _actionListView.Columns.Add("#", 36);
-        _actionListView.Columns.Add("Type", 100);
-        _actionListView.Columns.Add("Detail", 180);
+        _actionListView.Columns.Add("#", 34);
+        _actionListView.Columns.Add("Action", 80);
+        _actionListView.Columns.Add("Button", 150);
+        _actionListView.Columns.Add("Time", 90);
         _actionListView.OwnerDraw = true;
         _actionListView.DrawColumnHeader += ActionListView_DrawColumnHeader;
         _actionListView.DrawItem += ActionListView_DrawItem;
         _actionListView.DrawSubItem += ActionListView_DrawSubItem;
 
-        // Action button bar
-        var actionBtnBar = new Panel { Dock = DockStyle.Bottom, Height = 80, BackColor = _bgColor, Padding = new Padding(0, 6, 0, 0) };
+        // --- Composer: build one action at a time ---
+        var composer = new Panel { Dock = DockStyle.Bottom, Height = 120, BackColor = _bgColor };
+        var composerTopBorder = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = _borderColor };
 
-        _btnRecordActions = CreateButton("\u25CF Record", BtnRecordActions_Click);
-        _btnRecordActions.Width = 90;
-        _btnRecordActions.BackColor = Color.FromArgb(50, 50, 50);
-        var btnAddAction = CreateButton("+ Add Action", BtnAddAction_Click);
-        btnAddAction.Width = 100;
-        var btnRemoveAction = CreateButton("Remove", BtnRemoveAction_Click);
+        // Row 1: Button + Press/Hold + duration
+        var lblButton = new Label { Text = "Button", AutoSize = true, ForeColor = _fgColor, Location = new Point(2, 15) };
+        _buttonCombo = new ComboBox
+        {
+            Location = new Point(56, 12), Width = 132, BackColor = _fieldBg,
+            ForeColor = Color.FromArgb(86, 156, 214), FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            DropDownStyle = ComboBoxStyle.DropDown
+        };
+        PopulateButtonCombo();
+
+        _radioPress = new RadioButton { Text = "Press", AutoSize = true, Checked = true, ForeColor = _fgColor, Location = new Point(200, 13) };
+        _radioHold = new RadioButton { Text = "Hold", AutoSize = true, ForeColor = _fgColor, Location = new Point(266, 13) };
+        _radioPress.CheckedChanged += (s, e) => _durationNud.Enabled = _radioHold.Checked;
+        _radioHold.CheckedChanged += (s, e) => _durationNud.Enabled = _radioHold.Checked;
+
+        var lblFor = new Label { Text = "for", AutoSize = true, ForeColor = _fgColor, Location = new Point(324, 15) };
+        _durationNud = new NumericUpDown
+        {
+            Location = new Point(350, 12), Width = 66, Minimum = 10, Maximum = 60000, Increment = 50,
+            Value = 500, Enabled = false, BackColor = _fieldBg, ForeColor = _fgColor,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        var lblDurMs = new Label { Text = "ms", AutoSize = true, ForeColor = _fgColor, Location = new Point(420, 15) };
+        var btnAddAction = CreateButton("+ Add", BtnAddButtonAction_Click);
+        btnAddAction.Location = new Point(456, 11);
+
+        // Row 2: Delay
+        var lblDelay = new Label { Text = "Delay", AutoSize = true, ForeColor = _fgColor, Location = new Point(2, 55) };
+        _delayNud = new NumericUpDown
+        {
+            Location = new Point(56, 52), Width = 66, Minimum = 0, Maximum = 60000, Increment = 50,
+            Value = 200, BackColor = _fieldBg, ForeColor = _fgColor, BorderStyle = BorderStyle.FixedSingle
+        };
+        var lblDelayMs = new Label { Text = "ms", AutoSize = true, ForeColor = _fgColor, Location = new Point(126, 55) };
+        var btnAddDelay = CreateButton("+ Add Delay", BtnAddDelay_Click);
+        btnAddDelay.Location = new Point(162, 51);
+
+        // Row 3: list management
+        var btnRemoveAction = CreateButton("\u2716 Remove", BtnRemoveAction_Click);
+        btnRemoveAction.ForeColor = Color.FromArgb(244, 71, 71);
         var btnMoveUp = CreateButton("\u25B2 Up", BtnMoveUp_Click);
         var btnMoveDown = CreateButton("\u25BC Down", BtnMoveDown_Click);
+        btnRemoveAction.Location = new Point(2, 88);
+        btnMoveUp.Location = new Point(btnRemoveAction.Right + 6, 88);
+        btnMoveDown.Location = new Point(btnMoveUp.Right + 6, 88);
 
-        // Row 1: Record, Add Action
-        _btnRecordActions.Location = new Point(0, 0);
-        btnAddAction.Location = new Point(_btnRecordActions.Right + 6, 0);
+        composer.Controls.AddRange(new Control[]
+        {
+            lblButton, _buttonCombo, _radioPress, _radioHold, lblFor, _durationNud, lblDurMs, btnAddAction,
+            lblDelay, _delayNud, lblDelayMs, btnAddDelay,
+            btnRemoveAction, btnMoveUp, btnMoveDown, composerTopBorder
+        });
 
-        // Row 2: Remove, Up, Down
-        btnRemoveAction.Location = new Point(0, 34);
-        btnMoveUp.Location = new Point(btnRemoveAction.Right + 6, 34);
-        btnMoveDown.Location = new Point(btnMoveUp.Right + 6, 34);
-
-        actionBtnBar.Controls.AddRange(new Control[] { _btnRecordActions, btnAddAction, btnRemoveAction, btnMoveUp, btnMoveDown });
-
-        // Save/Cancel bar
-        var saveBar = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = _bgColor };
+        // Save bar
+        var saveBar = new Panel { Dock = DockStyle.Bottom, Height = 46, BackColor = _bgColor, Padding = new Padding(0, 6, 0, 0) };
         _btnSave = CreateButton("\u2714 Save Macro", BtnSave_Click);
-        _btnSave.Width = 110;
+        _btnSave.Location = new Point(2, 8);
         _btnSave.BackColor = Color.FromArgb(30, 100, 30);
         _btnSave.ForeColor = Color.FromArgb(180, 255, 180);
-        var btnCancel = CreateButton("Cancel", BtnCancel_Click);
-        _btnSave.Location = new Point(0, 6);
-        btnCancel.Location = new Point(_btnSave.Right + 8, 6);
+        _btnSave.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
         saveBar.Controls.Add(_btnSave);
-        saveBar.Controls.Add(btnCancel);
 
         rightPanel.Controls.Add(_actionListView);
-        rightPanel.Controls.Add(actionBtnBar);
+        rightPanel.Controls.Add(composer);
         rightPanel.Controls.Add(saveBar);
         rightPanel.Controls.Add(_actionsHeader);
 
@@ -389,7 +419,7 @@ internal class LogForm : Form
         // Deep-copy actions for editing
         _editingActions.Clear();
         foreach (var a in _selectedMacro.Actions)
-            _editingActions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DelayMs = a.DelayMs });
+            _editingActions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DurationMs = a.DurationMs, DelayMs = a.DelayMs });
 
         _actionsHeader.Text = $"ACTIONS  —  {_selectedMacro.Name}";
         RefreshActionList();
@@ -526,131 +556,83 @@ internal class LogForm : Form
         RefreshMacroList();
     }
 
-    // ==================== Action Recording ====================
+    // ==================== Action Composer ====================
 
-    private void BtnRecordActions_Click(object? sender, EventArgs e)
+    private void PopulateButtonCombo()
     {
-        if (_selectedMacro == null) return;
-
-        if (_hooks.IsRecordingActions)
+        _buttonCombo.Items.Clear();
+        foreach (var (name, vk) in _primaryKeys)
         {
-            StopActionRecording();
+            if (vk == 0) continue; // skip "None"
+            _buttonCombo.Items.Add(name);
+        }
+        _buttonCombo.Text = "";
+    }
+
+    /// <summary>Resolve the combo's text (typed or selected) to a virtual key code.</summary>
+    private bool TryResolveButton(string text, out ushort vk)
+    {
+        vk = 0;
+        text = text.Trim();
+        if (text.Length == 0) return false;
+
+        // Match a friendly name (case-insensitive)
+        foreach (var (name, v) in _primaryKeys)
+        {
+            if (v != 0 && string.Equals(name, text, StringComparison.OrdinalIgnoreCase)) { vk = v; return true; }
+        }
+
+        // Single character: letter or digit
+        if (text.Length == 1)
+        {
+            char c = char.ToUpperInvariant(text[0]);
+            if (c is >= 'A' and <= 'Z') { vk = c; return true; }
+            if (c is >= '0' and <= '9') { vk = c; return true; }
+        }
+        return false;
+    }
+
+    private void BtnAddButtonAction_Click(object? sender, EventArgs e)
+    {
+        if (_selectedMacro == null)
+        {
+            MessageBox.Show("Select or create a macro first.", "No macro selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!TryResolveButton(_buttonCombo.Text, out ushort vk))
+        {
+            MessageBox.Show("Pick a button from the list or type a valid key (e.g. E, Space, F1, Left Click).",
+                "Unknown button", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        _editingActions.Clear();
+        var action = _radioHold.Checked
+            ? new MacroAction { Type = MacroActionType.Hold, KeyCode = vk, DurationMs = (int)_durationNud.Value }
+            : new MacroAction { Type = MacroActionType.Press, KeyCode = vk };
+
+        _editingActions.Add(action);
         RefreshActionList();
-        _btnRecordActions.Text = "\u25A0 Stop";
-        _btnRecordActions.BackColor = Color.FromArgb(140, 40, 40);
-        _recordStopwatch = Stopwatch.StartNew();
-        _lastActionTimeMs = 0;
-        _hooks.IsRecordingActions = true;
+        SelectLastAction();
     }
 
-    private void OnActionInputRecorded(MacroActionType type, ushort vkCode)
+    private void BtnAddDelay_Click(object? sender, EventArgs e)
     {
-        if (this.InvokeRequired)
+        if (_selectedMacro == null)
         {
-            this.BeginInvoke(() => OnActionInputRecorded(type, vkCode));
+            MessageBox.Show("Select or create a macro first.", "No macro selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-
-        long nowMs = _recordStopwatch?.ElapsedMilliseconds ?? 0;
-        long gap = nowMs - _lastActionTimeMs;
-
-        // Insert delay if gap > 50ms and not the very first action
-        if (_editingActions.Count > 0 && gap > 50)
-        {
-            _editingActions.Add(new MacroAction { Type = MacroActionType.Delay, DelayMs = (int)gap });
-        }
-
-        _editingActions.Add(new MacroAction { Type = type, KeyCode = vkCode });
-        _lastActionTimeMs = nowMs;
+        _editingActions.Add(new MacroAction { Type = MacroActionType.Delay, DelayMs = (int)_delayNud.Value });
         RefreshActionList();
+        SelectLastAction();
     }
 
-    private void OnRecordingStopped()
+    private void SelectLastAction()
     {
-        if (this.InvokeRequired)
-        {
-            this.BeginInvoke(OnRecordingStopped);
-            return;
-        }
-        StopActionRecording();
-    }
-
-    private void StopActionRecording()
-    {
-        _hooks.IsRecordingActions = false;
-        _recordStopwatch?.Stop();
-        _btnRecordActions.Text = "\u25CF Record";
-        _btnRecordActions.BackColor = Color.FromArgb(50, 50, 50);
-    }
-
-    // ==================== Manual Action Add ====================
-
-    private void BtnAddAction_Click(object? sender, EventArgs e)
-    {
-        if (_selectedMacro == null) return;
-
-        var menu = new ContextMenuStrip { BackColor = _panelColor, ForeColor = _fgColor };
-        menu.Renderer = new DarkMenuRenderer(_panelColor, _accentColor, _fgColor);
-        menu.Items.Add("KeyPress", null, (s, ev) => PromptKeyAction(MacroActionType.KeyPress));
-        menu.Items.Add("KeyDown", null, (s, ev) => PromptKeyAction(MacroActionType.KeyDown));
-        menu.Items.Add("KeyUp", null, (s, ev) => PromptKeyAction(MacroActionType.KeyUp));
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Left Click", null, (s, ev) => { _editingActions.Add(new MacroAction { Type = MacroActionType.LeftClick }); RefreshActionList(); });
-        menu.Items.Add("Right Click", null, (s, ev) => { _editingActions.Add(new MacroAction { Type = MacroActionType.RightClick }); RefreshActionList(); });
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Delay (ms)", null, (s, ev) => PromptDelay());
-
-        var btn = (Button)sender!;
-        menu.Show(btn, new Point(0, btn.Height));
-    }
-
-    private void PromptKeyAction(MacroActionType type)
-    {
-        using var dlg = new Form
-        {
-            Text = $"Add {type}", Size = new Size(280, 130), StartPosition = FormStartPosition.CenterParent,
-            FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-            BackColor = _panelColor, ForeColor = _fgColor
-        };
-        var lbl = new Label { Text = "Press a key...", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 12) };
-        dlg.Controls.Add(lbl);
-        dlg.KeyPreview = true;
-        dlg.KeyDown += (s, e) =>
-        {
-            _editingActions.Add(new MacroAction { Type = type, KeyCode = (ushort)e.KeyCode });
-            RefreshActionList();
-            dlg.Close();
-        };
-        dlg.ShowDialog(this);
-    }
-
-    private void PromptDelay()
-    {
-        using var dlg = new Form
-        {
-            Text = "Add Delay", Size = new Size(280, 140), StartPosition = FormStartPosition.CenterParent,
-            FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-            BackColor = _panelColor, ForeColor = _fgColor
-        };
-        var lbl = new Label { Text = "Delay (ms):", Location = new Point(20, 20), AutoSize = true };
-        var nud = new NumericUpDown
-        {
-            Location = new Point(100, 17), Width = 120, Minimum = 10, Maximum = 30000, Value = 200,
-            BackColor = _fieldBg, ForeColor = _fgColor
-        };
-        var btnOk = CreateButton("OK", (s, e) =>
-        {
-            _editingActions.Add(new MacroAction { Type = MacroActionType.Delay, DelayMs = (int)nud.Value });
-            RefreshActionList();
-            dlg.Close();
-        });
-        btnOk.Location = new Point(100, 55);
-        dlg.Controls.AddRange(new Control[] { lbl, nud, btnOk });
-        dlg.ShowDialog(this);
+        if (_actionListView.Items.Count == 0) return;
+        var item = _actionListView.Items[^1];
+        item.Selected = true;
+        item.EnsureVisible();
     }
 
     // ==================== Action List Management ====================
@@ -691,25 +673,27 @@ internal class LogForm : Form
         for (int i = 0; i < _editingActions.Count; i++)
         {
             var a = _editingActions[i];
-            string detail = a.Type switch
+            string button = a.Type is MacroActionType.Press or MacroActionType.Hold
+                ? MacroAction.GetKeyName(a.KeyCode) : "";
+            string time = a.Type switch
             {
-                MacroActionType.KeyPress or MacroActionType.KeyDown or MacroActionType.KeyUp => MacroAction.GetKeyName(a.KeyCode),
+                MacroActionType.Hold => $"{a.DurationMs} ms",
                 MacroActionType.Delay => $"{a.DelayMs} ms",
                 _ => ""
             };
-            var item = new ListViewItem(new[] { (i + 1).ToString(), a.Type.ToString(), detail });
+            var item = new ListViewItem(new[] { (i + 1).ToString(), a.Type.ToString(), button, time });
             _actionListView.Items.Add(item);
         }
     }
 
-    // ==================== Save / Cancel ====================
+    // ==================== Save ====================
 
     private async void BtnSave_Click(object? sender, EventArgs e)
     {
         if (_selectedMacro == null) return;
         _selectedMacro.Actions.Clear();
         foreach (var a in _editingActions)
-            _selectedMacro.Actions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DelayMs = a.DelayMs });
+            _selectedMacro.Actions.Add(new MacroAction { Type = a.Type, KeyCode = a.KeyCode, DurationMs = a.DurationMs, DelayMs = a.DelayMs });
 
         try
         {
@@ -725,13 +709,6 @@ internal class LogForm : Form
         {
             MessageBox.Show($"Failed to save: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    private void BtnCancel_Click(object? sender, EventArgs e)
-    {
-        // Revert to saved state
-        if (_selectedMacro != null)
-            MacroList_SelectedIndexChanged(null, EventArgs.Empty);
     }
 
     // ==================== Action ListView Custom Draw ====================
@@ -756,15 +733,13 @@ internal class LogForm : Form
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
 
         Color textColor = _fgColor;
-        if (e.ColumnIndex == 1) // Type column — color by type
+        if (e.ColumnIndex == 1) // Action column — color by type
         {
             var typeText = e.SubItem!.Text;
             textColor = typeText switch
             {
-                "KeyPress" => Color.FromArgb(86, 156, 214),
-                "KeyDown" => Color.FromArgb(78, 201, 176),
-                "KeyUp" => Color.FromArgb(206, 145, 120),
-                "LeftClick" or "RightClick" => Color.FromArgb(220, 220, 170),
+                "Press" => Color.FromArgb(86, 156, 214),
+                "Hold" => Color.FromArgb(78, 201, 176),
                 "Delay" => Color.FromArgb(128, 128, 128),
                 _ => _fgColor
             };
@@ -772,30 +747,6 @@ internal class LogForm : Form
 
         using var fgBrush = new SolidBrush(textColor);
         e.Graphics.DrawString(e.SubItem!.Text, _actionListView.Font, fgBrush, e.Bounds.X + 4, e.Bounds.Y + 4);
-    }
-
-    // ==================== Dark Menu Renderer ====================
-
-    private sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
-    {
-        private readonly Color _bg, _highlight, _fg;
-        public DarkMenuRenderer(Color bg, Color highlight, Color fg) : base(new DarkColorTable(bg, highlight))
-        {
-            _bg = bg; _highlight = highlight; _fg = fg;
-        }
-        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) { e.TextColor = _fg; base.OnRenderItemText(e); }
-        private sealed class DarkColorTable : ProfessionalColorTable
-        {
-            private readonly Color _bg, _highlight;
-            public DarkColorTable(Color bg, Color highlight) { _bg = bg; _highlight = highlight; }
-            public override Color MenuItemSelected => _highlight;
-            public override Color ToolStripDropDownBackground => _bg;
-            public override Color ImageMarginGradientBegin => _bg;
-            public override Color ImageMarginGradientMiddle => _bg;
-            public override Color ImageMarginGradientEnd => _bg;
-            public override Color SeparatorDark => Color.FromArgb(60, 60, 60);
-            public override Color SeparatorLight => Color.FromArgb(60, 60, 60);
-        }
     }
 
     // ==================== Shared Button Factory ====================
@@ -864,8 +815,6 @@ internal class LogForm : Form
         else
         {
             Services.Logger.UnregisterViewer(Logger_OnLogMessage);
-            _hooks.OnActionInputRecorded -= OnActionInputRecorded;
-            _hooks.OnRecordingStopped -= OnRecordingStopped;
             base.OnFormClosing(e);
         }
     }

@@ -2,27 +2,24 @@ namespace AutoSkipper.Models;
 
 public enum MacroActionType
 {
-    KeyPress,
-    KeyDown,
-    KeyUp,
-    LeftClick,
-    RightClick,
-    Delay
+    Press, // Tap a key / mouse button (down + up)
+    Hold,  // Hold a key / mouse button down for DurationMs, then release
+    Delay  // Wait DelayMs
 }
 
 public class MacroAction
 {
     public MacroActionType Type { get; set; }
-    public ushort KeyCode { get; set; } // For KeyPress, KeyDown, KeyUp
-    public int DelayMs { get; set; } // For Delay
+    public ushort KeyCode { get; set; } // For Press / Hold (mouse: 0x01 L, 0x02 R, 0x04 M)
+    public int DurationMs { get; set; } // For Hold
+    public int DelayMs { get; set; }    // For Delay
+
+    public bool IsMouseButton => KeyCode is 0x01 or 0x02 or 0x04 or 0x05 or 0x06;
 
     public string GetDescription() => Type switch
     {
-        MacroActionType.KeyPress => $"KeyPress {GetKeyName(KeyCode)}",
-        MacroActionType.KeyDown => $"KeyDown {GetKeyName(KeyCode)}",
-        MacroActionType.KeyUp => $"KeyUp {GetKeyName(KeyCode)}",
-        MacroActionType.LeftClick => "Left Click",
-        MacroActionType.RightClick => "Right Click",
+        MacroActionType.Press => $"Press {GetKeyName(KeyCode)}",
+        MacroActionType.Hold => $"Hold {GetKeyName(KeyCode)} for {DurationMs}ms",
         MacroActionType.Delay => $"Delay {DelayMs}ms",
         _ => Type.ToString()
     };
@@ -43,7 +40,7 @@ public class MacroAction
         0xA4 => "LAlt", 0xA5 => "RAlt",
         0xBA => ";", 0xBB => "=", 0xBC => ",", 0xBD => "-", 0xBE => ".", 0xBF => "/",
         0xC0 => "`", 0xDB => "[", 0xDC => "\\", 0xDD => "]", 0xDE => "'",
-        0x01 => "LClick", 0x02 => "RClick", 0x04 => "MClick",
+        0x01 => "Left Click", 0x02 => "Right Click", 0x04 => "Middle Click",
         0x05 => "XButton1", 0x06 => "XButton2",
         _ => $"0x{vkCode:X2}"
     };
