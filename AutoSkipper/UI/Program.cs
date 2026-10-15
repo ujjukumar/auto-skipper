@@ -6,9 +6,21 @@ namespace AutoSkipper.UI;
 
 internal class Program
 {
+    // Session-wide names shared by every copy of the app.
+    internal const string InstanceMutexName = @"Local\GenshinAutoSkipper.Instance";
+    internal const string ShowWindowEventName = @"Local\GenshinAutoSkipper.ShowWindow";
+
     [STAThread]
     static void Main(string[] args)
     {
+        // Only one copy may run: a second would install the hooks again and double every press.
+        using var instanceMutex = new Mutex(initiallyOwned: false, InstanceMutexName, out bool isFirstInstance);
+        if (!isFirstInstance)
+        {
+            ActivateRunningInstance();
+            return;
+        }
+
         bool verbose = false;
         foreach (var arg in args)
         {
@@ -18,16 +30,78 @@ internal class Program
         Services.Logger.SetVerbose(verbose);
         
         ApplicationConfiguration.Initialize();
+        InstallErrorHandlers();
 
         try
         {
-            var config = ScreenConfig.CreateAsync().GetAwaiter().GetResult();
+            var config = ScreenConfig.Load();
             using var context = new AutoSkipperContext(config);
             Application.Run(context);
         }
         catch (Exception ex)
         {
+            WriteCrashLog(ex);
             MessageBox.Show($"Error: {ex.Message}", "AutoSkipper Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    // Asks the running copy to show its window (the user probably launched the
+    // app again because they couldn't find the tray icon).
+    private static void ActivateRunningInstance()
+    {
+        try
+        {
+            using var showEvent = EventWaitHandle.OpenExisting(ShowWindowEventName);
+            // This process owns the foreground right now; let the running copy take it.
+            Services.Native.AllowSetForegroundWindow(Services.Native.ASFW_ANY);
+            showEvent.Set();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show("AutoSkipper is already running. Look for its icon in the system tray.",
+                "AutoSkipper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    private static void InstallErrorHandlers()
+    {
+        // UI-thread exceptions are logged and the app keeps running.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (s, e) =>
+        {
+            WriteCrashLog(e.Exception);
+            Services.Logger.LogErrorStatic($"Unexpected error: {e.Exception.Message} (details in crash.log)");
+        };
+        TaskScheduler.UnobservedTaskException += (s, e) =>
+        {
+            WriteCrashLog(e.Exception);
+            Services.Logger.LogErrorStatic($"Unexpected background error: {e.Exception.InnerException?.Message ?? e.Exception.Message}");
+            e.SetObserved();
+        };
+        // Exceptions on other threads terminate the process; record why first.
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            WriteCrashLog(e.ExceptionObject as Exception);
+            MessageBox.Show($"AutoSkipper crashed: {(e.ExceptionObject as Exception)?.Message}\n\nDetails were saved to crash.log in %AppData%\\AutoSkipper.",
+                "AutoSkipper Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
+    }
+
+    // Written directly (not via the async logger) so it survives a dying process.
+    private static void WriteCrashLog(Exception? ex)
+    {
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AutoSkipper");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "crash.log");
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > 1_000_000) info.Delete();
+            File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Best effort only.
         }
     }
 }
@@ -40,6 +114,8 @@ internal class AutoSkipperContext : ApplicationContext
     private readonly Thread? _logicThread;
     private readonly LogForm _logForm;
     private readonly SynchronizationContext _ui;
+    private readonly EventWaitHandle _showWindowEvent;
+    private readonly RegisteredWaitHandle _showWindowWait;
     private Icon _defaultIcon = SystemIcons.Application;
     private Icon _activeIcon = SystemIcons.Application;
     private bool _inDialogue = false;
@@ -79,6 +155,11 @@ internal class AutoSkipperContext : ApplicationContext
         // Skipper events can fire on the logic thread; tray updates are posted to
         // the UI thread. Creating the form above installed the WinForms context.
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+
+        // Launching the app again signals this event (see Program.ActivateRunningInstance).
+        _showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowWindowEventName);
+        _showWindowWait = ThreadPool.RegisterWaitForSingleObject(_showWindowEvent,
+            (_, _) => _ui.Post(_ => ShowLogWindow(), null), null, Timeout.Infinite, executeOnlyOnce: false);
 
         var contextMenu = new ContextMenuStrip();
         
@@ -219,18 +300,18 @@ internal class AutoSkipperContext : ApplicationContext
 
     private void ShowLogs()
     {
-        if (_logForm.Visible)
-        {
-            _logForm.Hide();
-        }
-        else
-        {
-            if (_logForm.WindowState == FormWindowState.Minimized)
-                _logForm.WindowState = FormWindowState.Normal;
-            _logForm.Show();
-            _logForm.BringToFront();
-            _logForm.Activate();
-        }
+        if (_logForm.Visible) _logForm.Hide();
+        else ShowLogWindow();
+    }
+
+    private void ShowLogWindow()
+    {
+        if (_cleanupDone) return;
+        if (_logForm.WindowState == FormWindowState.Minimized)
+            _logForm.WindowState = FormWindowState.Normal;
+        _logForm.Show();
+        _logForm.BringToFront();
+        _logForm.Activate();
     }
 
     private async void Exit(object? sender, EventArgs e)
@@ -252,6 +333,8 @@ internal class AutoSkipperContext : ApplicationContext
         if (_cleanupDone) return;
         _cleanupDone = true;
 
+        _showWindowWait.Unregister(null);
+        _showWindowEvent.Dispose();
         _notifyIcon.Visible = false;
         _logForm.ForceClose();
 

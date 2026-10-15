@@ -20,7 +20,8 @@ internal class AutoSkipper : IDisposable
         get => _shouldExit;
         set => _shouldExit = value;
     }
-    private readonly IntPtr _hdc;
+    // Screen DC, acquired on the logic thread in Run().
+    private IntPtr _hdc;
     private CancellationTokenSource? _spamCancel;
     private readonly object _spamLock = new();
     private readonly object _toggleLock = new();
@@ -78,6 +79,13 @@ internal class AutoSkipper : IDisposable
     private int _dialogueNegativeStreak = 0;
     private bool _windowActive = false;
 
+    // The game's client area in screen pixels, and the detection pixels for its size.
+    // Tracking the window (not the primary screen) supports windowed mode, other
+    // monitors and resolution changes.
+    private const int MinGameAreaSize = 200;
+    private int _areaX, _areaY, _areaWidth, _areaHeight;
+    private PixelLayout _layout;
+
     // Counter State (shared between the logic thread and ToggleRun callers)
     private readonly object _counterLock = new();
     private int _pressCount = 0;
@@ -89,7 +97,6 @@ internal class AutoSkipper : IDisposable
         _cfg = cfg;
         _logger = logger;
         _inputSender = inputSender;
-        _hdc = Native.GetDC(IntPtr.Zero);
         _spamCancel = new CancellationTokenSource();
     }
 
@@ -97,13 +104,14 @@ internal class AutoSkipper : IDisposable
     {
         _spamCancel?.Cancel();
         _spamCancel?.Dispose();
-        Native.ReleaseDC(IntPtr.Zero, _hdc);
         GC.SuppressFinalize(this);
     }
 
-    public bool IsGameActive()
+    public bool IsGameActive() => TryGetGameWindow(out _);
+
+    private bool TryGetGameWindow(out IntPtr hwnd)
     {
-        IntPtr hwnd = Native.GetForegroundWindow();
+        hwnd = Native.GetForegroundWindow();
         if (hwnd == IntPtr.Zero) return false;
 
         Span<char> buffer = stackalloc char[256];
@@ -111,6 +119,27 @@ internal class AutoSkipper : IDisposable
         ReadOnlySpan<char> windowTitle = buffer[..length];
 
         return windowTitle.Equals(_cfg.Config.WindowTitle.AsSpan(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Refreshes the game's client area and recalculates the detection pixels when
+    // it moves or resizes. Returns false if there is no usable area (e.g. minimised).
+    private bool UpdateGameArea(IntPtr hwnd)
+    {
+        if (!Native.GetClientRect(hwnd, out var rect)) return false;
+        var origin = new Native.POINT();
+        if (!Native.ClientToScreen(hwnd, ref origin)) return false;
+
+        int width = rect.Right - rect.Left;
+        int height = rect.Bottom - rect.Top;
+        if (width < MinGameAreaSize || height < MinGameAreaSize) return false;
+
+        if (origin.x != _areaX || origin.y != _areaY || width != _areaWidth || height != _areaHeight)
+        {
+            (_areaX, _areaY, _areaWidth, _areaHeight) = (origin.x, origin.y, width, height);
+            _layout = PixelLayout.For(width, height);
+            _logger.Log($"Game area: {width}x{height} at ({origin.x},{origin.y})");
+        }
+        return true;
     }
 
     public bool ColorsMatch(uint pixel, int r, int g, int b)
@@ -137,21 +166,25 @@ internal class AutoSkipper : IDisposable
     private static double GetTime() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
     // Single raw pixel sample of the current dialogue state (no debounce).
+    // Pixel positions are relative to the game's client area.
     private bool DetectDialogueRaw()
     {
-        uint pPlaying = GetPixelWithRetry(_cfg.PLAYING_ICON.x, _cfg.PLAYING_ICON.y);
+        int playingX = _areaX + _layout.PlayingIcon.x;
+        int playingY = _areaY + _layout.PlayingIcon.y;
+        uint pPlaying = GetPixelWithRetry(playingX, playingY);
         bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
 
         if (_logger.IsVerbose)
-            _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({_cfg.PLAYING_ICON.x},{_cfg.PLAYING_ICON.y}) -> {isPlaying}");
+            _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({playingX},{playingY}) -> {isPlaying}");
 
         if (isPlaying) return true;
 
-        uint pLoad = GetPixelWithRetry(_cfg.LOADING_PIXEL.x, _cfg.LOADING_PIXEL.y);
+        uint pLoad = GetPixelWithRetry(_areaX + _layout.LoadingPixel.x, _areaY + _layout.LoadingPixel.y);
         if (ColorsMatch(pLoad, 255, 255, 255)) return false;
 
-        uint pLow = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.ly);
-        uint pHigh = GetPixelWithRetry(_cfg.DIALOGUE_ICON.x, _cfg.DIALOGUE_ICON.hy);
+        int choiceX = _areaX + _layout.DialogueIcon.x;
+        uint pLow = GetPixelWithRetry(choiceX, _areaY + _layout.DialogueIcon.ly);
+        uint pHigh = GetPixelWithRetry(choiceX, _areaY + _layout.DialogueIcon.hy);
         bool isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
 
         if (_logger.IsVerbose)
@@ -189,6 +222,11 @@ internal class AutoSkipper : IDisposable
 
     public void Run()
     {
+        // Per-monitor DPI awareness for this thread, so the game's window rect and
+        // screen pixels are physical pixels on every monitor regardless of the UI's
+        // DPI mode. The screen DC is acquired after, on this thread.
+        Native.SetThreadDpiAwarenessContext(Native.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        _hdc = Native.GetDC(IntPtr.Zero);
         _logger.Log("Ready.");
         
         double lastPressTime = GetTime();
@@ -210,7 +248,7 @@ internal class AutoSkipper : IDisposable
                     continue;
                 }
 
-                bool isActive = IsGameActive();
+                bool isActive = TryGetGameWindow(out IntPtr gameWindow);
 
                 if (isActive)
                 {
@@ -283,7 +321,7 @@ internal class AutoSkipper : IDisposable
                 // Dialogue detection
                 if (now >= nextStateCheck || actionDue)
                 {
-                    bool rawDialogue = DetectDialogueRaw();
+                    bool rawDialogue = UpdateGameArea(gameWindow) && DetectDialogueRaw();
                     _lastRawDialogue = rawDialogue;
 
                     if (rawDialogue)
@@ -387,6 +425,8 @@ internal class AutoSkipper : IDisposable
         }
         finally
         {
+            Native.ReleaseDC(IntPtr.Zero, _hdc);
+            _hdc = IntPtr.Zero;
             _logger.Log("Closing Logic Loop");
         }
     }
@@ -451,12 +491,6 @@ internal class AutoSkipper : IDisposable
         }
     }
     
-    public void HandleMouse4()
-    {
-        _logger.LogDebug(() => "Mouse4 detected");
-        if (IsGameActive()) { _inputSender.TapT(); _logger.Log("Remap: T"); }
-    }
-
     public void HandleMouse5()
     {
         _logger.LogDebug(() => "Mouse5 detected");

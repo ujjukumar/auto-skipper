@@ -43,7 +43,7 @@ public class MacroAction
         0xBA => ";", 0xBB => "=", 0xBC => ",", 0xBD => "-", 0xBE => ".", 0xBF => "/",
         0xC0 => "`", 0xDB => "[", 0xDC => "\\", 0xDD => "]", 0xDE => "'",
         0x01 => "Left Click", 0x02 => "Right Click", 0x04 => "Middle Click",
-        0x05 => "XButton1", 0x06 => "XButton2",
+        0x05 => "Mouse4", 0x06 => "Mouse5",
         _ => $"0x{vkCode:X2}"
     };
 }

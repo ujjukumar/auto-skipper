@@ -5,10 +5,19 @@ namespace AutoSkipper.Services;
 // --- 1. Low Level Native Interop (Win32 API) ---
 internal static partial class Native
 {
-    [LibraryImport("user32.dll")] public static partial int GetSystemMetrics(int nIndex);
     [LibraryImport("user32.dll")] public static partial IntPtr GetForegroundWindow();
     [LibraryImport("user32.dll", EntryPoint = "GetWindowTextW", StringMarshalling = StringMarshalling.Utf16)]
     public static partial int GetWindowText(IntPtr hWnd, Span<char> lpString, int nMaxCount);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    [LibraryImport("user32.dll")] public static partial IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool AllowSetForegroundWindow(uint dwProcessId);
     [LibraryImport("user32.dll")] public static partial IntPtr GetDC(IntPtr hWnd);
     [LibraryImport("user32.dll")] public static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [LibraryImport("gdi32.dll")] public static partial uint GetPixel(IntPtr hdc, int nXPos, int nYPos);
@@ -70,6 +79,12 @@ internal static partial class Native
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int x; public int y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
+    public const uint ASFW_ANY = 0xFFFFFFFF;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public POINT pt; }

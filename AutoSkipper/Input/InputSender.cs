@@ -9,10 +9,8 @@ namespace AutoSkipper.Input;
 internal sealed class InputSender : IInputSender
 {
     private const ushort VK_F = 0x46;
-    private const ushort VK_T = 0x54;
     private static readonly int InputSize = Marshal.SizeOf<Native.Input>();
 
-    public void TapT() => PressKey(VK_T);
     public void TapF() => PressKey(VK_F);
 
     public void PressKey(ushort vkCode) => Send([Key(vkCode, 0), Key(vkCode, Native.KEYEVENTF_KEYUP)]);

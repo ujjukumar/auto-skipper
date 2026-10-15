@@ -174,20 +174,27 @@ internal class GlobalHooks : IDisposable
         if ((hookStruct.flags & Native.LLMHF_INJECTED) != 0) return;
 
         int btn = (int)(hookStruct.mouseData >> 16);
-        if (btn == 1) _skipper.HandleMouse4();
-        else if (btn == 2) _skipper.HandleMouse5();
-        else return;
-
-        // Check macro combos that include mouse buttons
-        TryRunMacro(btn == 1 ? VK_XBUTTON1 : VK_XBUTTON2);
+        if (btn == 1)
+        {
+            TryRunMacro(VK_XBUTTON1);
+        }
+        else if (btn == 2)
+        {
+            // A macro bound to Mouse5 replaces the built-in F burst.
+            if (!TryRunMacro(VK_XBUTTON2)) _skipper.HandleMouse5();
+        }
     }
 
-    private void TryRunMacro(ushort justPressed)
+    // Returns true if a macro matched, even when it didn't run because the game
+    // isn't focused, so built-in actions on the same button stay suppressed.
+    private bool TryRunMacro(ushort justPressed)
     {
         var macro = FindMatchingMacro(justPressed);
+        if (macro == null) return false;
         // Macros only fire while the game is focused, so typing elsewhere can't trigger them.
-        if (macro != null && _skipper.IsGameActive())
+        if (_skipper.IsGameActive())
             _macroService.Run(macro);
+        return true;
     }
 
     /// <summary>
