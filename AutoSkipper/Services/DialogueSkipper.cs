@@ -4,12 +4,14 @@ using AutoSkipper.Models;
 
 namespace AutoSkipper.Services;
 
-internal class AutoSkipper : IDisposable
+// The main loop: while running and the game is focused, watches for dialogue and
+// presses F (or occasionally clicks) with humanised, randomised timing.
+internal class DialogueSkipper : IDisposable
 {
     public event Action<bool>? OnDialogueStateChanged;
     public event Action<bool>? OnRunningStateChanged;
     
-    private readonly ScreenConfig _cfg;
+    private readonly ConfigData _config;
     private readonly ILogger _logger;
     private readonly IInputSender _inputSender;
     private volatile bool _running = false;
@@ -20,8 +22,6 @@ internal class AutoSkipper : IDisposable
         get => _shouldExit;
         set => _shouldExit = value;
     }
-    // Screen DC, acquired on the logic thread in Run().
-    private IntPtr _hdc;
     private CancellationTokenSource? _spamCancel;
     private readonly object _spamLock = new();
     private readonly object _toggleLock = new();
@@ -40,6 +40,9 @@ internal class AutoSkipper : IDisposable
     private double _lastBreakCheck = 0.0;
     private const double BreakInterval = 30.0;
     private const double FastBurstMultiplier = 0.5;
+    // Outside dialogue the loop sleeps IdleSleepInterval between checks; the next
+    // check is scheduled slightly earlier (StateCheckInterval) so it is always due
+    // when the sleep ends.
     private const double StateCheckInterval = 0.15;
     private const double ActiveDialogueCheckInterval = 0.25;
     private const double IdleSleepInterval = 0.25;
@@ -62,10 +65,6 @@ internal class AutoSkipper : IDisposable
     private static readonly TimeSpan MouseBurstDuration = TimeSpan.FromSeconds(4);
     private const int InactivePauseSeconds = 120;
 
-    // GetPixel returns CLR_INVALID on failure. It must never count as a colour
-    // match, otherwise a failed read looks like a white dialogue-choice pixel.
-    private const uint ClrInvalid = 0xFFFFFFFF;
-
     // Dialogue debounce: how many consecutive raw pixel readings are required
     // before the authoritative dialogue state flips. This suppresses single-frame
     // false positives. Presses still stop on the first negative reading, because
@@ -79,22 +78,15 @@ internal class AutoSkipper : IDisposable
     private int _dialogueNegativeStreak = 0;
     private bool _windowActive = false;
 
-    // The game's client area in screen pixels, and the detection pixels for its size.
-    // Tracking the window (not the primary screen) supports windowed mode, other
-    // monitors and resolution changes.
-    private const int MinGameAreaSize = 200;
-    private int _areaX, _areaY, _areaWidth, _areaHeight;
-    private PixelLayout _layout;
-
     // Counter State (shared between the logic thread and ToggleRun callers)
     private readonly object _counterLock = new();
     private int _pressCount = 0;
     private double _sessionStartTime = 0.0;
     private double _inactiveSince = 0.0;
 
-    public AutoSkipper(ScreenConfig cfg, ILogger logger, IInputSender inputSender)
+    public DialogueSkipper(ConfigData config, ILogger logger, IInputSender inputSender)
     {
-        _cfg = cfg;
+        _config = config;
         _logger = logger;
         _inputSender = inputSender;
         _spamCancel = new CancellationTokenSource();
@@ -118,80 +110,10 @@ internal class AutoSkipper : IDisposable
         int length = Native.GetWindowText(hwnd, buffer, buffer.Length);
         ReadOnlySpan<char> windowTitle = buffer[..length];
 
-        return windowTitle.Equals(_cfg.Config.WindowTitle.AsSpan(), StringComparison.OrdinalIgnoreCase);
-    }
-
-    // Refreshes the game's client area and recalculates the detection pixels when
-    // it moves or resizes. Returns false if there is no usable area (e.g. minimised).
-    private bool UpdateGameArea(IntPtr hwnd)
-    {
-        if (!Native.GetClientRect(hwnd, out var rect)) return false;
-        var origin = new Native.POINT();
-        if (!Native.ClientToScreen(hwnd, ref origin)) return false;
-
-        int width = rect.Right - rect.Left;
-        int height = rect.Bottom - rect.Top;
-        if (width < MinGameAreaSize || height < MinGameAreaSize) return false;
-
-        if (origin.x != _areaX || origin.y != _areaY || width != _areaWidth || height != _areaHeight)
-        {
-            (_areaX, _areaY, _areaWidth, _areaHeight) = (origin.x, origin.y, width, height);
-            _layout = PixelLayout.For(width, height);
-            _logger.Log($"Game area: {width}x{height} at ({origin.x},{origin.y})");
-        }
-        return true;
-    }
-
-    public bool ColorsMatch(uint pixel, int r, int g, int b)
-    {
-        if (pixel == ClrInvalid) return false;
-        int pr = (int)(pixel & 0xFF);
-        int pg = (int)((pixel >> 8) & 0xFF);
-        int pb = (int)((pixel >> 16) & 0xFF);
-        int tolerance = _cfg.Config.ColorTolerance;
-        return Math.Abs(pr - r) <= tolerance && Math.Abs(pg - g) <= tolerance && Math.Abs(pb - b) <= tolerance;
-    }
-
-    private uint GetPixelWithRetry(int x, int y, int maxRetries = 3)
-    {
-        for (int i = 0; i < maxRetries; i++)
-        {
-            uint pixel = Native.GetPixel(_hdc, x, y);
-            if (pixel != ClrInvalid) return pixel;
-            if (i < maxRetries - 1) Thread.Sleep(1);
-        }
-        return ClrInvalid;
+        return windowTitle.Equals(_config.WindowTitle.AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static double GetTime() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
-
-    // Single raw pixel sample of the current dialogue state (no debounce).
-    // Pixel positions are relative to the game's client area.
-    private bool DetectDialogueRaw()
-    {
-        int playingX = _areaX + _layout.PlayingIcon.x;
-        int playingY = _areaY + _layout.PlayingIcon.y;
-        uint pPlaying = GetPixelWithRetry(playingX, playingY);
-        bool isPlaying = ColorsMatch(pPlaying, 236, 229, 216);
-
-        if (_logger.IsVerbose)
-            _logger.LogDebug(() => $"Playing pixel: RGB({(pPlaying & 0xFF)},{((pPlaying >> 8) & 0xFF)},{((pPlaying >> 16) & 0xFF)}) @ ({playingX},{playingY}) -> {isPlaying}");
-
-        if (isPlaying) return true;
-
-        uint pLoad = GetPixelWithRetry(_areaX + _layout.LoadingPixel.x, _areaY + _layout.LoadingPixel.y);
-        if (ColorsMatch(pLoad, 255, 255, 255)) return false;
-
-        int choiceX = _areaX + _layout.DialogueIcon.x;
-        uint pLow = GetPixelWithRetry(choiceX, _areaY + _layout.DialogueIcon.ly);
-        uint pHigh = GetPixelWithRetry(choiceX, _areaY + _layout.DialogueIcon.hy);
-        bool isChoice = ColorsMatch(pLow, 255, 255, 255) || ColorsMatch(pHigh, 255, 255, 255);
-
-        if (_logger.IsVerbose)
-            _logger.LogDebug(() => $"Choice pixels: Low=RGB({(pLow & 0xFF)},{((pLow >> 8) & 0xFF)},{((pLow >> 16) & 0xFF)}), High=RGB({(pHigh & 0xFF)},{((pHigh >> 8) & 0xFF)},{((pHigh >> 16) & 0xFF)}) -> {isChoice}");
-
-        return isChoice;
-    }
 
     private double NextKeyInterval()
     {
@@ -209,14 +131,14 @@ internal class AutoSkipper : IDisposable
         }
 
         // Standard speed
-        return _cfg.Config.StandardDelayMin + Random.Shared.NextDouble() * (_cfg.Config.StandardDelayMax - _cfg.Config.StandardDelayMin);
+        return _config.StandardDelayMin + Random.Shared.NextDouble() * (_config.StandardDelayMax - _config.StandardDelayMin);
     }
 
     // Fast burst: 50% of standard speed
     private double FastBurstInterval()
     {
-        double min = _cfg.Config.StandardDelayMin * FastBurstMultiplier;
-        double max = _cfg.Config.StandardDelayMax * FastBurstMultiplier;
+        double min = _config.StandardDelayMin * FastBurstMultiplier;
+        double max = _config.StandardDelayMax * FastBurstMultiplier;
         return min + Random.Shared.NextDouble() * (max - min);
     }
 
@@ -226,7 +148,8 @@ internal class AutoSkipper : IDisposable
         // screen pixels are physical pixels on every monitor regardless of the UI's
         // DPI mode. The screen DC is acquired after, on this thread.
         Native.SetThreadDpiAwarenessContext(Native.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        _hdc = Native.GetDC(IntPtr.Zero);
+        IntPtr screenDc = Native.GetDC(IntPtr.Zero);
+        var detector = new DialogueDetector(_config, _logger, screenDc);
         _logger.Log("Ready.");
         
         double lastPressTime = GetTime();
@@ -321,7 +244,7 @@ internal class AutoSkipper : IDisposable
                 // Dialogue detection
                 if (now >= nextStateCheck || actionDue)
                 {
-                    bool rawDialogue = UpdateGameArea(gameWindow) && DetectDialogueRaw();
+                    bool rawDialogue = detector.UpdateGameArea(gameWindow) && detector.Detect();
                     _lastRawDialogue = rawDialogue;
 
                     if (rawDialogue)
@@ -425,15 +348,14 @@ internal class AutoSkipper : IDisposable
         }
         finally
         {
-            Native.ReleaseDC(IntPtr.Zero, _hdc);
-            _hdc = IntPtr.Zero;
+            Native.ReleaseDC(IntPtr.Zero, screenDc);
             _logger.Log("Closing Logic Loop");
         }
     }
     
     private void PerformPress(double now)
     {
-        bool useClick = Random.Shared.NextDouble() < (_burstMode ? 0.0 : _cfg.Config.LeftClickChance);
+        bool useClick = Random.Shared.NextDouble() < (_burstMode ? 0.0 : _config.LeftClickChance);
         if (useClick) _inputSender.LeftClick(); else _inputSender.TapF();
         if (_logger.IsVerbose)
             _logger.LogDebug(() => $"Press: {(useClick ? "LeftClick" : "F")}");
@@ -491,6 +413,8 @@ internal class AutoSkipper : IDisposable
         }
     }
     
+    // Mouse5 (unless a macro is bound to it): press F rapidly for a few seconds.
+    // Pressing it again restarts the burst.
     public void HandleMouse5()
     {
         _logger.LogDebug(() => "Mouse5 detected");

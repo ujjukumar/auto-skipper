@@ -11,17 +11,13 @@ internal sealed class InputSender : IInputSender
     private const ushort VK_F = 0x46;
     private static readonly int InputSize = Marshal.SizeOf<Native.Input>();
 
-    public void TapF() => PressKey(VK_F);
-
-    public void PressKey(ushort vkCode) => Send([Key(vkCode, 0), Key(vkCode, Native.KEYEVENTF_KEYUP)]);
+    public void TapF() => Send([Key(VK_F, 0), Key(VK_F, Native.KEYEVENTF_KEYUP)]);
 
     public void KeyDown(ushort vkCode) => Send([Key(vkCode, 0)]);
 
     public void KeyUp(ushort vkCode) => Send([Key(vkCode, Native.KEYEVENTF_KEYUP)]);
 
     public void LeftClick() => Send([Mouse(Native.MOUSEEVENTF_LEFTDOWN), Mouse(Native.MOUSEEVENTF_LEFTUP)]);
-
-    public void RightClick() => Send([Mouse(Native.MOUSEEVENTF_RIGHTDOWN), Mouse(Native.MOUSEEVENTF_RIGHTUP)]);
 
     public void MouseDown(ushort vkCode)
     {

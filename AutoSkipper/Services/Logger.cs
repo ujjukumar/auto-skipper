@@ -84,44 +84,36 @@ public class Logger : ILogger
         }
     }
 
-    public void Log(string message)
-    {
-        if (_isShutdown) return;
-        _logQueue.TryAdd(new LogEntry(LogLevel.Info, message));
-    }
-    
-    // Static methods for compatibility
-    public static void LogStatic(string message) => new Logger().Log(message);
-    public static void LogSuccessStatic(string message) => new Logger().LogSuccess(message);
-    public static void LogWarningStatic(string message) => new Logger().LogWarning(message);
-    public static void LogErrorStatic(string message) => new Logger().LogError(message);
-    public static void LogDebugStatic(Func<string> messageFactory) => new Logger().LogDebug(messageFactory);
-
-    public void LogSuccess(string message)
-    {
-        if (_isShutdown) return;
-        _logQueue.TryAdd(new LogEntry(LogLevel.Success, message));
-    }
-    
-    public void LogWarning(string message)
-    {
-        if (_isShutdown) return;
-        _logQueue.TryAdd(new LogEntry(LogLevel.Warning, message));
-    }
-    
-    public void LogError(string message)
-    {
-        if (_isShutdown) return;
-        _logQueue.TryAdd(new LogEntry(LogLevel.Error, message));
-    }
+    public void Log(string message) => Enqueue(LogLevel.Info, message);
+    public void LogSuccess(string message) => Enqueue(LogLevel.Success, message);
+    public void LogWarning(string message) => Enqueue(LogLevel.Warning, message);
+    public void LogError(string message) => Enqueue(LogLevel.Error, message);
 
     public void LogDebug(Func<string> messageFactory)
     {
-        if (_isShutdown || !_verbose) return;
-        _logQueue.TryAdd(new LogEntry(LogLevel.Debug, messageFactory()));
+        if (_verbose) Enqueue(LogLevel.Debug, messageFactory());
     }
 
     public bool IsVerbose => _verbose;
+
+    // For code without an ILogger instance (static helpers, config loading).
+    public static void LogStatic(string message) => Enqueue(LogLevel.Info, message);
+    public static void LogSuccessStatic(string message) => Enqueue(LogLevel.Success, message);
+    public static void LogWarningStatic(string message) => Enqueue(LogLevel.Warning, message);
+    public static void LogErrorStatic(string message) => Enqueue(LogLevel.Error, message);
+
+    private static void Enqueue(LogLevel level, string message)
+    {
+        if (_isShutdown) return;
+        try
+        {
+            _logQueue.TryAdd(new LogEntry(level, message));
+        }
+        catch (InvalidOperationException)
+        {
+            // Shutdown completed between the check and the add.
+        }
+    }
 
     // Attaches a viewer, replaying all buffered history first so it sees past
     // entries, then receiving live updates. Done under the history lock so no
@@ -147,7 +139,7 @@ public class Logger : ILogger
     public static void SetVerbose(bool verbose)
     {
         _verbose = verbose;
-        if (verbose) new Logger().Log("Verbose mode enabled");
+        if (verbose) LogStatic("Verbose mode enabled");
     }
 
     public static void ToggleFileLogging()
@@ -158,21 +150,19 @@ public class Logger : ILogger
             {
                 try
                 {
-                    string appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AutoSkipper");
-                    Directory.CreateDirectory(appDataPath);
-                    string logPath = Path.Combine(appDataPath, "autoskip_dialogue.log");
-                    var stream = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+                    Directory.CreateDirectory(AppPaths.DataDirectory);
+                    var stream = new FileStream(AppPaths.LogFile, FileMode.Append, FileAccess.Write, FileShare.Read);
                     _logWriter = new StreamWriter(stream, Encoding.UTF8, 4096) { AutoFlush = false };
-                    new Logger().LogSuccess("File logging enabled.");
+                    LogSuccessStatic("File logging enabled.");
                 }
                 catch (Exception ex)
                 {
-                    new Logger().LogError($"Failed to enable file logging: {ex.Message}");
+                    LogErrorStatic($"Failed to enable file logging: {ex.Message}");
                 }
             }
             else
             {
-                new Logger().Log("File logging disabled.");
+                LogStatic("File logging disabled.");
                 _logWriter.Flush();
                 _logWriter.Dispose();
                 _logWriter = null;
@@ -182,7 +172,7 @@ public class Logger : ILogger
 
     public static void Shutdown()
     {
-        _logQueue.TryAdd(new LogEntry(LogLevel.Info, "Logger shutting down..."));
+        Enqueue(LogLevel.Info, "Logger shutting down...");
         _isShutdown = true;
         _logQueue.CompleteAdding();
 

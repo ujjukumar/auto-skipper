@@ -9,4 +9,7 @@
   <Project Path="AutoSkipper/AutoSkipper.csproj">
     <Platform Project="x64" />
   </Project>
+  <Project Path="AutoSkipper.Tests/AutoSkipper.Tests.csproj">
+    <Platform Project="x64" />
+  </Project>
 </Solution>

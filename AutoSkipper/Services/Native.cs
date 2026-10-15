@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace AutoSkipper.Services;
 
-// --- 1. Low Level Native Interop (Win32 API) ---
+// Win32 interop.
 internal static partial class Native
 {
     [LibraryImport("user32.dll")] public static partial IntPtr GetForegroundWindow();
@@ -21,7 +21,6 @@ internal static partial class Native
     [LibraryImport("user32.dll")] public static partial IntPtr GetDC(IntPtr hWnd);
     [LibraryImport("user32.dll")] public static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [LibraryImport("gdi32.dll")] public static partial uint GetPixel(IntPtr hdc, int nXPos, int nYPos);
-    [LibraryImport("user32.dll")] public static partial void PostQuitMessage(int nExitCode);
     [LibraryImport("user32.dll")] public static partial short GetAsyncKeyState(int vKey);
     
     // Hooks
@@ -73,9 +72,7 @@ internal static partial class Native
     public const int WM_KEYUP = 0x0101;
     public const int WM_SYSKEYDOWN = 0x0104;
     public const int WM_SYSKEYUP = 0x0105;
-    public const int WM_LBUTTONDOWN = 0x0201;
     public const int WM_XBUTTONDOWN = 0x020B;
-    public const int WM_XBUTTONUP = 0x020C;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int x; public int y; }
