@@ -23,7 +23,10 @@ internal class AutoSkipper : IDisposable
     private readonly IntPtr _hdc;
     private CancellationTokenSource? _spamCancel;
     private readonly object _spamLock = new();
-    private readonly ManualResetEventSlim _wakeEvent = new(false);
+    private readonly object _toggleLock = new();
+    // Auto-reset so a Wake() that arrives while the loop isn't waiting is kept
+    // for the next wait instead of being lost.
+    private readonly AutoResetEvent _wakeEvent = new(false);
 
     // State
     private int _burstPool = 0;
@@ -49,7 +52,6 @@ internal class AutoSkipper : IDisposable
     private const int BurstPoolMax = 6;
     private const int BurstRemainingMin = 3;
     private const int BurstRemainingMax = 6;
-    private const int WaitEventTimeout = 500;
     private const double WindowCheckInterval = 0.4;
     private const double FastBurstChance = 1.0 / 40.0;
     private const double BreakChance = 0.015;
@@ -202,8 +204,8 @@ internal class AutoSkipper : IDisposable
 
                 if (!_running)
                 {
-                    _wakeEvent.Wait(WaitEventTimeout);
-                    _wakeEvent.Reset();
+                    // Paused: block until ToggleRun or shutdown wakes us.
+                    _wakeEvent.WaitOne();
                     lastPressTime = GetTime();
                     continue;
                 }
@@ -430,8 +432,7 @@ internal class AutoSkipper : IDisposable
         int ms = (int)(timeout * 1000);
         if (ms > 0)
         {
-            _wakeEvent.Wait(ms);
-            _wakeEvent.Reset();
+            _wakeEvent.WaitOne(ms);
         }
     }
 
@@ -439,8 +440,9 @@ internal class AutoSkipper : IDisposable
 
     public void ToggleRun(bool on) 
     { 
-        if (_running != on)
+        lock (_toggleLock)
         {
+            if (_running == on) return;
             _running = on; 
             OnRunningStateChanged?.Invoke(on);
             string countLog = on ? "" : TakeCountLog();

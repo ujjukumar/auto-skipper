@@ -1,5 +1,9 @@
+using System.Collections.Concurrent;
+using System.Text;
 using AutoSkipper.Input;
 using AutoSkipper.Models;
+using AutoSkipper.Services;
+using LogLevel = AutoSkipper.Services.Logger.LogLevel;
 
 namespace AutoSkipper.UI;
 
@@ -18,15 +22,40 @@ internal class LogForm : Form
     private bool _allowClose = false;
 
     // --- Theme ---
-    private readonly Color _bgColor = Color.FromArgb(30, 30, 30);
-    private readonly Color _panelColor = Color.FromArgb(37, 37, 38);
-    private readonly Color _fgColor = Color.FromArgb(204, 204, 204);
-    private readonly Color _accentColor = Color.FromArgb(0, 122, 204);
-    private readonly Color _btnColor = Color.FromArgb(60, 60, 60);
-    private readonly Color _borderColor = Color.FromArgb(50, 50, 50);
-    private readonly Color _fieldBg = Color.FromArgb(45, 45, 45);
+    private static readonly Color _bgColor = Color.FromArgb(30, 30, 30);
+    private static readonly Color _panelColor = Color.FromArgb(37, 37, 38);
+    private static readonly Color _fgColor = Color.FromArgb(204, 204, 204);
+    private static readonly Color _accentColor = Color.FromArgb(0, 122, 204);
+    private static readonly Color _btnColor = Color.FromArgb(60, 60, 60);
+    private static readonly Color _borderColor = Color.FromArgb(50, 50, 50);
+    private static readonly Color _fieldBg = Color.FromArgb(45, 45, 45);
+
+    // GDI objects used by the owner-draw handlers, created once instead of per paint.
+    private static readonly SolidBrush _bgBrush = new(_bgColor);
+    private static readonly SolidBrush _altRowBrush = new(Color.FromArgb(35, 35, 35));
+    private static readonly SolidBrush _panelBrush = new(_panelColor);
+    private static readonly SolidBrush _accentBrush = new(_accentColor);
+    private static readonly SolidBrush _fgBrush = new(_fgColor);
+    private static readonly SolidBrush _mutedBrush = new(Color.FromArgb(150, 150, 150));
+    private static readonly SolidBrush _pressBrush = new(Color.FromArgb(86, 156, 214));
+    private static readonly SolidBrush _holdBrush = new(Color.FromArgb(78, 201, 176));
+    private static readonly SolidBrush _delayBrush = new(Color.FromArgb(128, 128, 128));
+    private static readonly Font _headerFont = new("Segoe UI", 8.5f, FontStyle.Bold);
+    private static readonly Font _buttonFont = new("Segoe UI", 9);
 
     // --- Logs tab ---
+    // The logger thread only queues lines; a UI timer appends them in batches.
+    // While the window is hidden it is detached from the logger entirely, and
+    // showing it replays the logger's history.
+    private const int MaxLogLines = 2000;
+    private const int LogTrimSlack = 200;
+    private const int LogFlushIntervalMs = 100;
+    private readonly record struct LogLine(DateTime Timestamp, LogLevel Level, string Message);
+    private static readonly string[] _levelLabels = Enum.GetValues<LogLevel>().Select(l => Logger.LevelName(l).PadRight(7)).ToArray();
+    private readonly ConcurrentQueue<LogLine> _pendingLogs = new();
+    private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = LogFlushIntervalMs };
+    private bool _viewerAttached = false;
+    private long _clearedBeforeTicks = 0;
     private readonly RichTextBox _richTextBox;
     private readonly CheckBox _autoScrollCheck;
     private bool _autoScroll = true;
@@ -79,15 +108,19 @@ internal class LogForm : Form
             Dock = DockStyle.Top, Height = 40,
             BackColor = _panelColor, Padding = new Padding(10, 0, 10, 0)
         };
-        var btnClear = CreateButton("Clear", (s, e) => _richTextBox!.Clear());
+        var btnClear = CreateButton("Clear", (s, e) => ClearLogs());
         btnClear.Location = new Point(10, 8);
         _autoScrollCheck = new CheckBox
         {
             Text = "Auto-Scroll", Checked = true, AutoSize = true,
             Location = new Point(btnClear.Right + 15, 11),
-            ForeColor = _fgColor, Font = new Font("Segoe UI", 9)
+            ForeColor = _fgColor, Font = _buttonFont
         };
-        _autoScrollCheck.CheckedChanged += (s, e) => _autoScroll = _autoScrollCheck.Checked;
+        _autoScrollCheck.CheckedChanged += (s, e) =>
+        {
+            _autoScroll = _autoScrollCheck.Checked;
+            if (_autoScroll) ScrollLogToEnd();
+        };
         toolbar.Controls.Add(btnClear);
         toolbar.Controls.Add(_autoScrollCheck);
 
@@ -119,7 +152,10 @@ internal class LogForm : Form
             BorderStyle = BorderStyle.None,
             ScrollBars = RichTextBoxScrollBars.Vertical
         };
+        // Read-only log: no need for RichEdit to keep an undo history of every append.
+        _richTextBox.HandleCreated += (s, e) => Native.SendMessage(_richTextBox.Handle, Native.EM_SETUNDOLIMIT, 0, 0);
         _logContainer.Controls.Add(_richTextBox);
+        _logTimer.Tick += (s, e) => FlushPendingLogs();
 
         // === Macro Container (hidden initially) ===
         _macroContainer = new Panel
@@ -134,9 +170,8 @@ internal class LogForm : Form
         this.Controls.Add(tabBar);
         this.Controls.Add(toolbar);
 
-        // Force handle creation & hook logger
+        // Force handle creation. The log viewer attaches when the form is shown.
         var _ = this.Handle;
-        Services.Logger.RegisterViewer(Logger_OnLogMessage);
 
         // Hide to tray on minimize instead of leaving a minimized window.
         // This also avoids the RichTextBox losing its content when its handle
@@ -453,11 +488,9 @@ internal class LogForm : Form
     {
         if (e.Index < 0 || e.Index >= _macroList.Items.Count) return;
         bool selected = (e.State & DrawItemState.Selected) != 0;
-        using var bgBrush = new SolidBrush(selected ? _accentColor : _bgColor);
-        e.Graphics.FillRectangle(bgBrush, e.Bounds);
-        using var fgBrush = new SolidBrush(_fgColor);
+        e.Graphics.FillRectangle(selected ? _accentBrush : _bgBrush, e.Bounds);
         var macro = (Macro)_macroList.Items[e.Index];
-        e.Graphics.DrawString($"{macro.Name}  [{macro.GetTriggerDisplay()}]", e.Font!, fgBrush, e.Bounds.X + 8, e.Bounds.Y + 5);
+        e.Graphics.DrawString($"{macro.Name}  [{macro.GetTriggerDisplay()}]", e.Font!, _fgBrush, e.Bounds.X + 8, e.Bounds.Y + 5);
     }
 
     // Shows the selected macro in the editor. _loadingUI stops the field
@@ -750,10 +783,8 @@ internal class LogForm : Form
 
     private void ActionListView_DrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
-        using var bgBrush = new SolidBrush(_panelColor);
-        e.Graphics.FillRectangle(bgBrush, e.Bounds);
-        using var fgBrush = new SolidBrush(Color.FromArgb(150, 150, 150));
-        e.Graphics.DrawString(e.Header!.Text, new Font("Segoe UI", 8.5f, FontStyle.Bold), fgBrush, e.Bounds.X + 4, e.Bounds.Y + 4);
+        e.Graphics.FillRectangle(_panelBrush, e.Bounds);
+        e.Graphics.DrawString(e.Header!.Text, _headerFont, _mutedBrush, e.Bounds.X + 4, e.Bounds.Y + 4);
     }
 
     private void ActionListView_DrawItem(object? sender, DrawListViewItemEventArgs e)
@@ -764,24 +795,21 @@ internal class LogForm : Form
     private void ActionListView_DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         bool selected = e.Item!.Selected;
-        using var bgBrush = new SolidBrush(selected ? _accentColor : (e.ItemIndex % 2 == 0 ? _bgColor : Color.FromArgb(35, 35, 35)));
-        e.Graphics.FillRectangle(bgBrush, e.Bounds);
+        e.Graphics.FillRectangle(selected ? _accentBrush : (e.ItemIndex % 2 == 0 ? _bgBrush : _altRowBrush), e.Bounds);
 
-        Color textColor = _fgColor;
+        Brush textBrush = _fgBrush;
         if (e.ColumnIndex == 1) // Action column — color by type
         {
-            var typeText = e.SubItem!.Text;
-            textColor = typeText switch
+            textBrush = e.SubItem!.Text switch
             {
-                "Press" => Color.FromArgb(86, 156, 214),
-                "Hold" => Color.FromArgb(78, 201, 176),
-                "Delay" => Color.FromArgb(128, 128, 128),
-                _ => _fgColor
+                "Press" => _pressBrush,
+                "Hold" => _holdBrush,
+                "Delay" => _delayBrush,
+                _ => _fgBrush
             };
         }
 
-        using var fgBrush = new SolidBrush(textColor);
-        e.Graphics.DrawString(e.SubItem!.Text, _actionListView.Font, fgBrush, e.Bounds.X + 4, e.Bounds.Y + 4);
+        e.Graphics.DrawString(e.SubItem!.Text, _actionListView.Font, textBrush, e.Bounds.X + 4, e.Bounds.Y + 4);
     }
 
     // ==================== Shared Button Factory ====================
@@ -792,7 +820,7 @@ internal class LogForm : Form
         {
             Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat,
             ForeColor = _fgColor, BackColor = _btnColor, Cursor = Cursors.Hand,
-            Font = new Font("Segoe UI", 9), Padding = new Padding(4, 1, 4, 1)
+            Font = _buttonFont, Padding = new Padding(4, 1, 4, 1)
         };
         btn.FlatAppearance.BorderSize = 0;
         btn.FlatAppearance.MouseOverBackColor = _accentColor;
@@ -802,42 +830,161 @@ internal class LogForm : Form
 
     // ==================== Logger ====================
 
-    private void Logger_OnLogMessage(DateTime timestamp, Services.Logger.LogLevel level, string message)
+    // Called on the logger thread (and on the UI thread while replaying history).
+    private void OnLogMessage(DateTime timestamp, LogLevel level, string message)
     {
-        if (_richTextBox.IsDisposed || !_richTextBox.IsHandleCreated) return;
-        if (_richTextBox.InvokeRequired)
+        if (timestamp.Ticks < Interlocked.Read(ref _clearedBeforeTicks)) return;
+        _pendingLogs.Enqueue(new LogLine(timestamp, level, message));
+    }
+
+    private void AttachLogViewer()
+    {
+        if (_viewerAttached) return;
+        _viewerAttached = true;
+        _pendingLogs.Clear();
+        _richTextBox.Clear();
+        Logger.RegisterViewer(OnLogMessage); // replays history, then streams live
+        FlushPendingLogs();
+        _logTimer.Start();
+    }
+
+    private void DetachLogViewer()
+    {
+        if (!_viewerAttached) return;
+        _viewerAttached = false;
+        _logTimer.Stop();
+        Logger.UnregisterViewer(OnLogMessage);
+        _pendingLogs.Clear();
+    }
+
+    private void ClearLogs()
+    {
+        // Also hides these entries from the history replay when the window is reopened.
+        Interlocked.Exchange(ref _clearedBeforeTicks, DateTime.Now.Ticks);
+        _pendingLogs.Clear();
+        _richTextBox.Clear();
+    }
+
+    private static Color LevelColor(LogLevel level) => level switch
+    {
+        LogLevel.Info => Color.FromArgb(86, 156, 214),
+        LogLevel.Debug => Color.FromArgb(128, 128, 128),
+        LogLevel.Error => Color.FromArgb(244, 71, 71),
+        LogLevel.Success => Color.FromArgb(106, 153, 85),
+        LogLevel.Warning => Color.FromArgb(206, 145, 120),
+        _ => _fgColor
+    };
+
+    // Appends all queued lines as one RTF insert with redraw suspended, then
+    // trims the oldest lines so the control never grows past MaxLogLines.
+    // (One RTF insert is ~70x faster than colouring each run via selection.)
+    private void FlushPendingLogs()
+    {
+        if (_pendingLogs.IsEmpty || _richTextBox.IsDisposed) return;
+
+        // Lines beyond the cap would be trimmed right away; don't render them.
+        for (int excess = _pendingLogs.Count - MaxLogLines; excess > 0; excess--)
+            _pendingLogs.TryDequeue(out _);
+
+        var rtf = new StringBuilder(4096);
+        rtf.Append(_rtfHeader ??= BuildRtfHeader());
+        while (_pendingLogs.TryDequeue(out var line))
         {
-            _richTextBox.BeginInvoke(new Action(() => Logger_OnLogMessage(timestamp, level, message)));
-            return;
+            rtf.Append(@"\cf").Append(RtfTimestampColor).Append(' ').Append(line.Timestamp.ToString("HH:mm:ss")).Append("  ");
+            rtf.Append(@"\cf").Append(RtfLevelColorBase + (int)line.Level).Append(' ').Append(_levelLabels[(int)line.Level]);
+            rtf.Append(@"\cf").Append(RtfMessageColor).Append("  ");
+            AppendRtfEscaped(rtf, line.Message);
+            rtf.Append(@"\par ");
         }
+        rtf.Append('}');
 
-        Color color = level switch
+        var rtb = _richTextBox;
+        IntPtr hwnd = rtb.Handle;
+        var scrollPos = new Native.POINT();
+        if (!_autoScroll) Native.SendMessage(hwnd, Native.EM_GETSCROLLPOS, 0, ref scrollPos);
+        Native.SendMessage(hwnd, Native.WM_SETREDRAW, 0, 0);
+        try
         {
-            Services.Logger.LogLevel.Info => Color.FromArgb(86, 156, 214),
-            Services.Logger.LogLevel.Debug => Color.FromArgb(128, 128, 128),
-            Services.Logger.LogLevel.Error => Color.FromArgb(244, 71, 71),
-            Services.Logger.LogLevel.Success => Color.FromArgb(106, 153, 85),
-            Services.Logger.LogLevel.Warning => Color.FromArgb(206, 145, 120),
-            _ => _fgColor
-        };
-
-        _richTextBox.SelectionStart = _richTextBox.TextLength;
-        _richTextBox.SelectionLength = 0;
-        _richTextBox.SelectionColor = Color.Gray;
-        _richTextBox.AppendText($"{timestamp:HH:mm:ss} ");
-        _richTextBox.SelectionColor = color;
-        _richTextBox.AppendText($" {level.ToString().ToUpper().PadRight(7)} ");
-        _richTextBox.SelectionColor = _fgColor;
-        _richTextBox.AppendText($"{message}\n");
-
-        if (_autoScroll)
+            rtb.Select(rtb.TextLength, 0);
+            rtb.SelectedRtf = rtf.ToString();
+            TrimLog();
+            rtb.Select(rtb.TextLength, 0);
+        }
+        finally
         {
-            _richTextBox.SelectionStart = _richTextBox.TextLength;
-            _richTextBox.ScrollToCaret();
+            Native.SendMessage(hwnd, Native.WM_SETREDRAW, 1, 0);
+            if (_autoScroll) rtb.ScrollToCaret();
+            else Native.SendMessage(hwnd, Native.EM_SETSCROLLPOS, 0, ref scrollPos);
+            rtb.Invalidate();
         }
     }
 
-    // ==================== Close Handling ====================
+    // RTF colour table: 1 = timestamp, 2.. = one per log level, then message text.
+    private const int RtfTimestampColor = 1;
+    private const int RtfLevelColorBase = 2;
+    private static readonly int RtfMessageColor = RtfLevelColorBase + Enum.GetValues<LogLevel>().Length;
+    private string? _rtfHeader;
+
+    private string BuildRtfHeader()
+    {
+        var sb = new StringBuilder(@"{\rtf1\ansi\deff0{\fonttbl{\f0 ");
+        sb.Append(_richTextBox.Font.Name).Append(@";}}{\colortbl;");
+        AppendRtfColor(sb, Color.Gray);
+        foreach (var level in Enum.GetValues<LogLevel>())
+            AppendRtfColor(sb, LevelColor(level));
+        AppendRtfColor(sb, _fgColor);
+        sb.Append(@"}\f0\fs").Append((int)Math.Round(_richTextBox.Font.SizeInPoints * 2)).Append(' ');
+        return sb.ToString();
+    }
+
+    private static void AppendRtfColor(StringBuilder sb, Color c) =>
+        sb.Append(@"\red").Append(c.R).Append(@"\green").Append(c.G).Append(@"\blue").Append(c.B).Append(';');
+
+    private static void AppendRtfEscaped(StringBuilder sb, string text)
+    {
+        foreach (char c in text)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append(@"\\"); break;
+                case '{': sb.Append(@"\{"); break;
+                case '}': sb.Append(@"\}"); break;
+                case '\n': sb.Append(@"\line "); break;
+                case '\t': sb.Append(@"\tab "); break;
+                case < ' ': break; // drops \r and other control characters
+                case < (char)0x80: sb.Append(c); break;
+                default: sb.Append(@"\u").Append((short)c).Append('?'); break; // signed 16-bit, per RTF spec
+            }
+        }
+    }
+
+    private void TrimLog()
+    {
+        int lines = _richTextBox.GetLineFromCharIndex(_richTextBox.TextLength);
+        if (lines <= MaxLogLines + LogTrimSlack) return;
+        int cut = _richTextBox.GetFirstCharIndexFromLine(lines - MaxLogLines);
+        if (cut <= 0) return;
+        // RichEdit silently ignores deletions while read-only, so lift it briefly.
+        _richTextBox.ReadOnly = false;
+        _richTextBox.Select(0, cut);
+        _richTextBox.SelectedText = "";
+        _richTextBox.ReadOnly = true;
+    }
+
+    private void ScrollLogToEnd()
+    {
+        _richTextBox.Select(_richTextBox.TextLength, 0);
+        _richTextBox.ScrollToCaret();
+    }
+
+    // ==================== Visibility / Close Handling ====================
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible) AttachLogViewer();
+        else DetachLogViewer();
+    }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
@@ -848,9 +995,15 @@ internal class LogForm : Form
         }
         else
         {
-            Services.Logger.UnregisterViewer(Logger_OnLogMessage);
+            DetachLogViewer();
             base.OnFormClosing(e);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _logTimer.Dispose();
+        base.Dispose(disposing);
     }
 
     public void ForceClose()

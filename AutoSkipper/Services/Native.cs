@@ -34,6 +34,16 @@ internal static partial class Native
     public static partial bool TranslateMessage(in MSG lpMsg);
     [LibraryImport("user32.dll", EntryPoint = "DispatchMessageW")]
     public static partial IntPtr DispatchMessage(in MSG lpMsg);
+    [LibraryImport("user32.dll", EntryPoint = "PostThreadMessageW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostThreadMessage(uint idThread, uint msg, IntPtr wParam, IntPtr lParam);
+    [LibraryImport("kernel32.dll")] public static partial uint GetCurrentThreadId();
+
+    // Window messages
+    [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
+    public static partial IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
+    public static partial IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, ref POINT lParam);
 
     // Input
     [LibraryImport("user32.dll")] public static partial uint SendInput(uint nInputs, ReadOnlySpan<Input> pInputs, int cbSize);
@@ -45,6 +55,11 @@ internal static partial class Native
 
     public const int WH_KEYBOARD_LL = 13;
     public const int WH_MOUSE_LL = 14;
+    public const uint WM_QUIT = 0x0012;
+    public const uint WM_SETREDRAW = 0x000B;
+    public const uint EM_SETUNDOLIMIT = 0x0452;
+    public const uint EM_GETSCROLLPOS = 0x04DD;
+    public const uint EM_SETSCROLLPOS = 0x04DE;
     public const int WM_KEYDOWN = 0x0100;
     public const int WM_KEYUP = 0x0101;
     public const int WM_SYSKEYDOWN = 0x0104;

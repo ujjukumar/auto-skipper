@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using AutoSkipper.Interfaces;
 
 namespace AutoSkipper.Services;
 
-// A high-performance, asynchronous logger designed to minimize impact on the main application thread.
-// It uses a background thread to process and write log messages from a concurrent queue.
+// Asynchronous logger: callers only enqueue. A dedicated background thread keeps
+// the in-memory history, notifies viewers (the log window) and writes the
+// optional log file. The app is a WinExe, so there is no console to write to.
 public class Logger : ILogger
 {
     public enum LogLevel { Info, Debug, Error, Success, Warning }
@@ -25,8 +27,11 @@ public class Logger : ILogger
         }
     }
 
+    private static readonly string[] _levelNames = Enum.GetValues<LogLevel>().Select(l => l.ToString().ToUpperInvariant()).ToArray();
+    public static string LevelName(LogLevel level) => _levelNames[(int)level];
+
     private static readonly BlockingCollection<LogEntry> _logQueue = new(new ConcurrentQueue<LogEntry>());
-    private static readonly Task _consumerTask;
+    private static readonly Thread _consumerThread;
     private static volatile bool _isShutdown = false;
 
     // Bounded in-memory history so viewers (e.g. the log window) can replay past entries.
@@ -40,7 +45,10 @@ public class Logger : ILogger
 
     static Logger()
     {
-        _consumerTask = Task.Run(ProcessQueue);
+        // A dedicated thread rather than Task.Run: the consumer blocks for the
+        // lifetime of the app and shouldn't permanently occupy a pool thread.
+        _consumerThread = new Thread(ProcessQueue) { IsBackground = true, Name = "AutoSkipper Logger" };
+        _consumerThread.Start();
     }
 
     private static void ProcessQueue()
@@ -57,23 +65,6 @@ public class Logger : ILogger
                     OnLogMessage?.Invoke(entry.Timestamp, entry.Level, entry.Message);
                 }
 
-                string timestamp = $"{entry.Timestamp:HH:mm:ss.fff}";
-                string level = entry.Level.ToString().ToUpper();
-                
-                // Color output to console
-                Console.ForegroundColor = entry.Level switch
-                {
-                    LogLevel.Info => ConsoleColor.Blue,
-                    LogLevel.Debug => ConsoleColor.Gray,
-                    LogLevel.Error => ConsoleColor.Red,
-                    LogLevel.Success => ConsoleColor.Green,
-                    LogLevel.Warning => ConsoleColor.Yellow,
-                    _ => ConsoleColor.White
-                };
-                
-                Console.WriteLine($"{timestamp} | {level} | {entry.Message}");
-                Console.ResetColor();
-                
                 // Written under the lock so F7 can't dispose the writer mid-write.
                 // Flushing when the queue drains keeps the file current without
                 // flushing on every line during bursts.
@@ -81,14 +72,14 @@ public class Logger : ILogger
                 {
                     if (_logWriter != null)
                     {
-                        _logWriter.WriteLine($"{timestamp} | {level} | {entry.Message}");
+                        _logWriter.WriteLine($"{entry.Timestamp:HH:mm:ss.fff} | {LevelName(entry.Level)} | {entry.Message}");
                         if (_logQueue.Count == 0) _logWriter.Flush();
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[FATAL] Logger failed: {ex.Message}");
+                Debug.WriteLine($"[FATAL] Logger failed: {ex.Message}");
             }
         }
     }
@@ -196,7 +187,7 @@ public class Logger : ILogger
         _logQueue.CompleteAdding();
 
         // Wait for the consumer to finish.
-        _consumerTask.Wait(1500);
+        _consumerThread.Join(1500);
 
         // Final flush and close of the file writer.
         lock (_fileLock)
